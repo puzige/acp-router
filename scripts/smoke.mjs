@@ -26,11 +26,14 @@ try {
 
   if (
     result.stderr
-    || result.serverVersion !== "0.2.0"
+    || result.serverVersion !== "0.2.1"
     || result.discoveryCount < 1
     || result.runStatus !== "completed"
     || result.adapterStatus !== "opencode_acp"
     || result.providerSessionId !== "fake-opencode-session"
+    || result.failureStatus !== "timed_out"
+    || !result.failureReason?.includes("Insufficient balance")
+    || !result.agentErrors?.some((error) => error.includes("Rate limit exceeded"))
   ) {
     process.exitCode = 1;
   }
@@ -60,6 +63,12 @@ process.stdin.on("data", (chunk) => {
     } else if (message.method === "session/new" || message.method === "session/resume") {
       write({ jsonrpc: "2.0", id: message.id, result: { sessionId: "fake-opencode-session" } });
     } else if (message.method === "session/prompt") {
+      const promptText = (message.params.prompt ?? []).map((part) => part.text ?? "").join("\\n");
+      if (promptText.includes("Trigger failure")) {
+        write({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "fake-opencode-session", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Insufficient balance" } } } });
+        write({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "fake-opencode-session", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Rate limit exceeded" } } } });
+        return;
+      }
       write({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "fake-opencode-session", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Fake OpenCode completed." } } } });
       write({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
     } else {
@@ -137,7 +146,24 @@ async function runMcpSmoke(home, worktree, binDir) {
     }
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 3000));
+  await waitForMessage(() => parseMessages(stdout).find((message) => message.id === 4), 3000);
+  send(child, {
+    jsonrpc: "2.0",
+    id: 5,
+    method: "tools/call",
+    params: {
+      name: "run_coding_agent",
+      arguments: {
+        agent: "opencode",
+        worktree,
+        prompt: "Trigger failure: insufficient balance",
+        async: false,
+        timeoutSec: 1,
+        permissionProfile: "workspace_write"
+      }
+    }
+  });
+  await waitForMessage(() => parseMessages(stdout).find((message) => message.id === 5), 4000);
   child.kill("SIGTERM");
 
   const messages = parseMessages(stdout);
@@ -155,8 +181,22 @@ async function runMcpSmoke(home, worktree, binDir) {
     runStatus: parsedToolResults[4]?.status,
     adapterStatus: parsedToolResults[4]?.adapterStatus,
     providerSessionId: parsedToolResults[4]?.providerSessionId,
+    failureStatus: parsedToolResults[5]?.status,
+    failureReason: parsedToolResults[5]?.failureReason,
+    agentErrors: parsedToolResults[5]?.agentErrors,
+    failureProviderSessionId: parsedToolResults[5]?.providerSessionId,
     isGitRepository: parsedToolResults[4]?.worktreeState?.after?.isGitRepository
   };
+}
+
+async function waitForMessage(getMessage, timeoutMs) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const message = getMessage();
+    if (message) return message;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return null;
 }
 
 function send(child, message) {

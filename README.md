@@ -13,6 +13,7 @@ This repository is an alpha implementation. It can:
 - write per-job JSONL logs;
 - capture current git worktree state for recorded jobs.
 - run OpenCode through ACP stdio when external launch is explicitly enabled.
+- return ACP adapter failures in `failureReason` and `agentErrors`, including provider-side errors such as balance or rate-limit failures.
 
 External launch is disabled by default. `run_coding_agent` records a completed `record_only` job unless `launchExternalAgents` is enabled. The only runnable adapter today is OpenCode ACP, and it currently requires `async=false`.
 

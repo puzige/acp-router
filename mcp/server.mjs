@@ -8,7 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const SERVER_NAME = "acp-coding-agent-dispatcher";
-const SERVER_VERSION = "0.2.0";
+const SERVER_VERSION = "0.2.1";
 const DATA_DIR = path.join(os.homedir(), ".codex", "agent-dispatcher");
 const REGISTRY_PATH = path.join(DATA_DIR, "registry.json");
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
@@ -528,6 +528,8 @@ async function createJob(args) {
     adapterStatus: job.adapterStatus,
     providerSessionId: session.providerSessionId,
     stopReason: job.stopReason,
+    failureReason: job.failureReason ?? null,
+    agentErrors: job.agentErrors ?? [],
     selectionReason: selected.reason,
     message: `${selected.agentId} job recorded by dispatcher alpha. Use get_coding_agent_job to inspect it.`
   };
@@ -808,6 +810,7 @@ function findActiveWorktreeJob(registry, worktree, permissionProfile) {
 async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec }) {
   const events = [];
   const startedAt = Date.now();
+  let providerSessionId = session.providerSessionId ?? null;
   const client = new AcpStdioClient({
     command: selectedAgent.installedPath ?? selectedAgent.executable ?? "opencode",
     args: ["acp", "--cwd", args.worktree, "--print-logs", "--log-level", "ERROR"],
@@ -834,9 +837,9 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
       result: summarizeInitializeResult(initialize)
     });
 
-    const sessionResult = session.providerSessionId
+    const sessionResult = providerSessionId
       ? await client.request("session/resume", {
-        sessionId: session.providerSessionId,
+        sessionId: providerSessionId,
         cwd: args.worktree,
         mcpServers: []
       })
@@ -844,7 +847,7 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
         cwd: args.worktree,
         mcpServers: []
       });
-    const providerSessionId = session.providerSessionId ?? sessionResult.sessionId;
+    providerSessionId = providerSessionId ?? sessionResult.sessionId;
     events.push({
       type: session.providerSessionId ? "acp_session_resumed" : "acp_session_created",
       timestamp: new Date().toISOString(),
@@ -891,6 +894,8 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
         adapterStatus: "opencode_acp",
         providerSessionId,
         stopReason,
+        failureReason: null,
+        agentErrors: [],
         changedFiles,
         worktreeState: {
           before: job.worktreeState,
@@ -906,30 +911,39 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
     const afterState = args.collectDiff === false
       ? { skipped: true, reason: "collectDiff disabled" }
       : await collectWorktreeState(args.worktree);
+    const collectedEvents = [...events, ...client.drainLogEvents()];
+    const agentErrors = extractAgentErrors(collectedEvents);
+    const failureReason = buildFailureReason(error, agentErrors);
     return {
       events: [
-        ...events,
-        ...client.drainLogEvents(),
+        ...collectedEvents,
         {
           type: "acp_error",
           timestamp: failedAt,
-          message: error.message
+          message: failureReason,
+          errorMessage: error.message,
+          agentErrors
         },
         buildAcpProcessClosedEvent(startedAt)
       ],
       sessionPatch: {
-        status: "idle"
+        providerSessionId,
+        status: "idle",
+        canContinue: Boolean(providerSessionId)
       },
       jobPatch: {
         status: error.code === "timeout" ? "timed_out" : "failed",
         endedAt: failedAt,
         adapterStatus: "opencode_acp",
+        providerSessionId,
+        failureReason,
+        agentErrors,
         changedFiles: diffChangedFiles(job.worktreeState, afterState),
         worktreeState: {
           before: job.worktreeState,
           after: afterState
         },
-        resultSummary: `OpenCode ACP failed: ${error.message}`,
+        resultSummary: failureReason,
         validation: [],
         risks: ["Inspect the job log before re-running the agent."]
       }
@@ -1164,6 +1178,57 @@ function extractAgentText(events) {
     .map((event) => event.params?.update?.content?.text)
     .filter(Boolean);
   return chunks.join("").trim();
+}
+
+const AGENT_ERROR_PATTERNS = [
+  /insufficient balance/i,
+  /rate limit/i,
+  /quota/i,
+  /unauthorized/i,
+  /forbidden/i,
+  /permission denied/i,
+  /auth(?:entication)? failed/i,
+  /\berror\b/i,
+  /\bfailed\b/i
+];
+
+function extractAgentErrors(events) {
+  const candidates = [];
+  for (const event of events) {
+    candidates.push(event.message);
+    candidates.push(event.errorMessage);
+    candidates.push(event.params?.update?.content?.text);
+    candidates.push(event.params?.update?.error?.message);
+    candidates.push(event.params?.update?.message);
+    candidates.push(event.params?.error?.message);
+    candidates.push(event.result?.error?.message);
+  }
+  return uniqueStrings(
+    candidates
+      .filter((value) => typeof value === "string")
+      .map((value) => preview(value.trim().replace(/\s+/g, " "), 500))
+      .filter(Boolean)
+      .filter((value) => AGENT_ERROR_PATTERNS.some((pattern) => pattern.test(value)))
+  ).slice(0, 5);
+}
+
+function buildFailureReason(error, agentErrors) {
+  if (agentErrors.length > 0) {
+    const suffix = error.code === "timeout" ? " (request timed out after agent error)" : "";
+    return `OpenCode ACP failed: ${agentErrors.join("; ")}${suffix}`;
+  }
+  return `OpenCode ACP failed: ${error.message}`;
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    if (seen.has(value)) continue;
+    seen.add(value);
+    result.push(value);
+  }
+  return result;
 }
 
 function diffChangedFiles(beforeState, afterState) {
