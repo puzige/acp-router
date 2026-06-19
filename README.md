@@ -21,6 +21,8 @@ The dispatcher does not set an ACP model by default. When an ACP agent exposes s
 
 External launch is disabled by default. `run_coding_agent` records a completed `record_only` job unless `launchExternalAgents` is enabled. Runnable adapters currently require `async=false`; async job execution is still tracked as a later milestone.
 
+External agent processes inherit the dispatcher process environment by default, matching direct terminal usage for tools such as Claude Code. Set `inheritEnvironment=false` through `configure_coding_agent_dispatcher` to restrict child process environment variables to the minimal dispatcher allowlist.
+
 ## Validate
 
 ```bash

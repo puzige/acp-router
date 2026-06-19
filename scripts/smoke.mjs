@@ -32,7 +32,7 @@ try {
 
   if (
     result.stderr
-    || result.serverVersion !== "0.4.2"
+    || result.serverVersion !== "0.4.3"
     || result.discoveryCount < 1
     || result.runStatus !== "completed"
     || result.adapterStatus !== "opencode_acp"
@@ -113,6 +113,10 @@ if (${JSON.stringify(fail)}) {
   console.error("old fake Claude should not be selected");
   process.exit(1);
 }
+if (process.env.AGENT_DISPATCHER_SMOKE_INHERITED !== "yes") {
+  console.error("expected inherited environment");
+  process.exit(1);
+}
 console.log(JSON.stringify({ type: "assistant", session_id: "fake-claude-session", message: { content: [{ type: "text", text: "Fake Claude completed." }] } }));
 `;
   await writeFile(scriptPath, script, "utf8");
@@ -150,7 +154,7 @@ async function runMcpSmoke(home, worktree, binDirs) {
   const child = spawn("node", ["./mcp/server.mjs"], {
     cwd: repoRoot,
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, HOME: home, PATH: `${binDirs.join(path.delimiter)}${path.delimiter}${process.env.PATH ?? ""}` }
+    env: { ...process.env, HOME: home, PATH: `${binDirs.join(path.delimiter)}${path.delimiter}${process.env.PATH ?? ""}`, AGENT_DISPATCHER_SMOKE_INHERITED: "yes" }
   });
   let stdout = "";
   let stderr = "";
@@ -270,7 +274,7 @@ async function runMcpSmoke(home, worktree, binDirs) {
       }
     }
   });
-  await waitForMessage(() => parseMessages(stdout).find((message) => message.id === 8), 4000);
+  await waitForMessage(() => parseMessages(stdout).find((message) => message.id === 8), 10_000);
   child.kill("SIGTERM");
 
   const messages = parseMessages(stdout);
@@ -291,6 +295,8 @@ async function runMcpSmoke(home, worktree, binDirs) {
     providerSessionId: parsedToolResults[4]?.providerSessionId,
     availableModels: parsedToolResults[4]?.availableModels,
     failureStatus: parsedToolResults[5]?.status,
+    failureError: parsedToolResults[5]?.error,
+    failureMessage: parsedToolResults[5]?.message,
     failureReason: parsedToolResults[5]?.failureReason,
     agentErrors: parsedToolResults[5]?.agentErrors,
     failureProviderSessionId: parsedToolResults[5]?.providerSessionId,

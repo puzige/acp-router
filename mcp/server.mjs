@@ -8,7 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const SERVER_NAME = "acp-coding-agent-dispatcher";
-const SERVER_VERSION = "0.4.2";
+const SERVER_VERSION = "0.4.3";
 const DATA_DIR = process.env.AGENT_DISPATCHER_DATA_DIR
   ? path.resolve(process.env.AGENT_DISPATCHER_DATA_DIR)
   : path.join(os.homedir(), ".codex", "agent-dispatcher");
@@ -52,7 +52,8 @@ const TOOL_DEFINITIONS = [
         disabledAgents: { type: "array", items: { type: "string" } },
         allowCurrentDirectory: { type: "boolean" },
         launchExternalAgents: { type: "boolean" },
-        allowBypassPermissions: { type: "boolean" }
+        allowBypassPermissions: { type: "boolean" },
+        inheritEnvironment: { type: "boolean" }
       },
       additionalProperties: false
     }
@@ -326,7 +327,10 @@ async function configureDispatcher(args) {
       : existing.safety.launchExternalAgents,
     allowBypassPermissions: typeof args.allowBypassPermissions === "boolean"
       ? args.allowBypassPermissions
-      : existing.safety.allowBypassPermissions
+      : existing.safety.allowBypassPermissions,
+    inheritEnvironment: typeof args.inheritEnvironment === "boolean"
+      ? args.inheritEnvironment
+      : existing.safety.inheritEnvironment
   };
   const next = {
     ...existing,
@@ -411,6 +415,7 @@ async function createJob(args) {
     ? { skipped: true, reason: "collectDiff disabled" }
     : await collectWorktreeState(args.worktree);
   const launchingEnabled = config.safety.launchExternalAgents === true;
+  const agentEnv = safeEnv({ inheritEnvironment: config.safety.inheritEnvironment === true });
   const launchPlan = planLaunch({ launchingEnabled, selectedAgent, async: args.async });
   const adapterStatus = launchPlan.adapterStatus;
   const initialStatus = launchPlan.runnable ? "running" : launchPlan.status;
@@ -482,14 +487,16 @@ async function createJob(args) {
         job,
         session,
         selectedAgent,
-        timeoutSec: args.timeoutSec ?? 3600
+        timeoutSec: args.timeoutSec ?? 3600,
+        agentEnv
       })
       : await runCliFallbackJob({
         args,
         job,
         session,
         selectedAgent,
-        timeoutSec: args.timeoutSec ?? 3600
+        timeoutSec: args.timeoutSec ?? 3600,
+        agentEnv
       });
     Object.assign(job, runResult.jobPatch);
     Object.assign(session, runResult.sessionPatch);
@@ -623,7 +630,8 @@ async function readConfig() {
       requireAbsoluteWorktree: true,
       launchExternalAgents: false,
       defaultPermissionProfile: "workspace_write",
-      allowBypassPermissions: false
+      allowBypassPermissions: false,
+      inheritEnvironment: true
     },
     updatedAt: null
   };
@@ -905,7 +913,7 @@ function planLaunch({ launchingEnabled, selectedAgent, async }) {
   };
 }
 
-async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec }) {
+async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec, agentEnv }) {
   const events = [];
   const startedAt = Date.now();
   let providerSessionId = session.providerSessionId ?? null;
@@ -916,6 +924,7 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
     args: ["acp", "--cwd", args.worktree, "--print-logs", "--log-level", "ERROR"],
     cwd: args.worktree,
     timeoutMs: timeoutSec * 1000,
+    env: agentEnv,
     onEvent: (event) => events.push(event)
   });
 
@@ -1072,7 +1081,7 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
   }
 }
 
-async function runCliFallbackJob({ args, job, session, selectedAgent, timeoutSec }) {
+async function runCliFallbackJob({ args, job, session, selectedAgent, timeoutSec, agentEnv }) {
   const spec = getCliAdapterSpec(selectedAgent.id);
   if (!spec) throw new Error(`No CLI adapter is registered for ${selectedAgent.id}.`);
   const startedAt = Date.now();
@@ -1095,7 +1104,8 @@ async function runCliFallbackJob({ args, job, session, selectedAgent, timeoutSec
     command,
     args: commandArgs,
     cwd: args.worktree,
-    timeoutMs: timeoutSec * 1000
+    timeoutMs: timeoutSec * 1000,
+    env: agentEnv
   });
   const endedAt = new Date().toISOString();
   const stdoutEvents = parseCliStream(result.stdout, "stdout");
@@ -1259,12 +1269,12 @@ function mapCodexSandbox(permissionProfile) {
   return "workspace-write";
 }
 
-function runCliProcess({ command, args, cwd, timeoutMs }) {
+function runCliProcess({ command, args, cwd, timeoutMs, env }) {
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: safeEnv()
+      env: env ?? safeEnv()
     });
     let stdout = "";
     let stderr = "";
@@ -1304,11 +1314,12 @@ function appendLimited(current, chunk, maxLength) {
 }
 
 class AcpStdioClient {
-  constructor({ command, args, cwd, timeoutMs, onEvent }) {
+  constructor({ command, args, cwd, timeoutMs, env, onEvent }) {
     this.command = command;
     this.args = args;
     this.cwd = cwd;
     this.timeoutMs = timeoutMs;
+    this.env = env ?? safeEnv();
     this.onEvent = onEvent;
     this.nextId = 1;
     this.pending = new Map();
@@ -1322,7 +1333,7 @@ class AcpStdioClient {
     this.child = spawn(this.command, this.args, {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: safeEnv()
+      env: this.env
     });
     this.child.stdout.setEncoding("utf8");
     this.child.stderr.setEncoding("utf8");
@@ -1721,8 +1732,9 @@ const AGENT_ERROR_PATTERNS = [
   /forbidden/i,
   /permission denied/i,
   /auth(?:entication)? failed/i,
-  /\berror\b/i,
-  /\bfailed\b/i
+  /failed to authenticate/i,
+  /not logged in/i,
+  /\berror\b/i
 ];
 
 function extractAgentErrors(events) {
@@ -1804,13 +1816,20 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function safeEnv() {
-  const env = {
+function safeEnv({ inheritEnvironment = true } = {}) {
+  const env = inheritEnvironment ? { ...process.env } : {};
+  return {
+    ...env,
     PATH: process.env.PATH ?? "",
     HOME: process.env.HOME ?? os.homedir(),
     LANG: process.env.LANG ?? "C.UTF-8",
-    LC_ALL: process.env.LC_ALL ?? "C.UTF-8"
+    LC_ALL: process.env.LC_ALL ?? "C.UTF-8",
+    ...allowlistedAgentEnv()
   };
+}
+
+function allowlistedAgentEnv() {
+  const env = {};
   for (const key of AGENT_ENV_ALLOWLIST) {
     if (process.env[key]) env[key] = process.env[key];
   }
