@@ -37,4 +37,4 @@ When calling `run_coding_agent` or `continue_coding_agent_session`, include:
 - Constraints from the user and repository instructions.
 - Expected final report: changed files, tests or validation, risks, and unresolved questions.
 
-The V1 scaffolded MCP server exposes safe local registry stubs. It records jobs and sessions but does not launch external agent processes until adapters are implemented.
+The alpha MCP server exposes safe local registry tools. It discovers installed agents, records jobs and sessions, writes JSONL job logs, and captures current git worktree state. External process launch is intentionally disabled until ACP and CLI adapters are implemented.

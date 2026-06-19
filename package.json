@@ -1,12 +1,13 @@
 {
   "name": "acp-coding-agent-dispatcher",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
-  "description": "Local Codex plugin scaffold for dispatching coding tasks to ACP or CLI agents.",
+  "description": "Local Codex plugin for discovering coding agents and recording dispatcher jobs.",
   "scripts": {
     "start:mcp": "node ./mcp/server.mjs",
-    "check": "node --check ./mcp/server.mjs"
+    "check": "node --check ./mcp/server.mjs",
+    "smoke": "node ./scripts/smoke.mjs"
   },
   "engines": {
     "node": ">=18"

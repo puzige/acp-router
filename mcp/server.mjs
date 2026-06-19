@@ -1,14 +1,20 @@
 #!/usr/bin/env node
 
 import fs from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 const SERVER_NAME = "acp-coding-agent-dispatcher";
-const SERVER_VERSION = "0.1.0";
+const SERVER_VERSION = "0.1.1";
 const DATA_DIR = path.join(os.homedir(), ".codex", "agent-dispatcher");
 const REGISTRY_PATH = path.join(DATA_DIR, "registry.json");
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
+const LOG_DIR = path.join(DATA_DIR, "logs");
+const COMMAND_TIMEOUT_MS = 3000;
+const execFileAsync = promisify(execFile);
 
 const TOOL_DEFINITIONS = [
   {
@@ -41,14 +47,16 @@ const TOOL_DEFINITIONS = [
         defaultAgent: { type: ["string", "null"] },
         modeDefaults: { type: "object", additionalProperties: { type: "string" } },
         disabledAgents: { type: "array", items: { type: "string" } },
-        allowCurrentDirectory: { type: "boolean" }
+        allowCurrentDirectory: { type: "boolean" },
+        launchExternalAgents: { type: "boolean" },
+        allowBypassPermissions: { type: "boolean" }
       },
       additionalProperties: false
     }
   },
   {
     name: "run_coding_agent",
-    description: "Create a tracked coding-agent job. V1 scaffold records the job but does not launch an external process.",
+    description: "Create a tracked coding-agent job and collect safe local registry/log metadata.",
     inputSchema: {
       type: "object",
       required: ["prompt", "worktree"],
@@ -159,6 +167,8 @@ const BUILT_IN_AGENTS = [
   {
     id: "opencode",
     displayName: "OpenCode",
+    executable: "opencode",
+    versionArgs: ["--version"],
     transport: "acp_stdio",
     command: "opencode acp --cwd <worktree>",
     capabilities: ["session_list", "session_continue", "file_edit", "shell", "diff_collection"],
@@ -168,6 +178,8 @@ const BUILT_IN_AGENTS = [
   {
     id: "cursor-agent",
     displayName: "Cursor Agent",
+    executable: "agent",
+    versionArgs: ["--version"],
     transport: "cli",
     command: "agent --print --output-format stream-json --workspace <worktree>",
     capabilities: ["file_edit", "shell", "diff_collection"],
@@ -177,6 +189,8 @@ const BUILT_IN_AGENTS = [
   {
     id: "claude",
     displayName: "Claude Code",
+    executable: "claude",
+    versionArgs: ["--version"],
     transport: "cli",
     command: "claude -p --output-format stream-json",
     capabilities: ["file_edit", "shell", "permission_modes", "diff_collection"],
@@ -186,6 +200,8 @@ const BUILT_IN_AGENTS = [
   {
     id: "codex",
     displayName: "Codex CLI",
+    executable: "codex",
+    versionArgs: ["--version"],
     transport: "cli",
     command: "codex exec",
     capabilities: ["file_edit", "shell", "diff_collection"],
@@ -284,24 +300,7 @@ async function callTool(name, args) {
 async function discoverAgents(args) {
   const config = await readConfig();
   const pathEntries = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
-  const agents = await Promise.all(BUILT_IN_AGENTS.map(async (agent) => {
-    const executable = agent.id === "cursor-agent" ? "agent" : agent.id;
-    const installedPath = await findExecutable(executable, pathEntries);
-    const disabled = config.disabledAgents.includes(agent.id);
-    const status = disabled ? "disabled" : installedPath ? "available" : "not_installed";
-    return {
-      id: agent.id,
-      displayName: agent.displayName,
-      status,
-      version: null,
-      transport: agent.transport,
-      command: agent.command,
-      source: agent.source,
-      capabilities: agent.capabilities,
-      icon: null,
-      notes: installedPath ? [`Found at ${installedPath}`] : agent.notes
-    };
-  }));
+  const agents = await Promise.all(BUILT_IN_AGENTS.map((agent) => probeAgent(agent, config, pathEntries)));
   const filteredAgents = args.includeNotInstalled === false
     ? agents.filter((agent) => agent.status !== "not_installed")
     : agents;
@@ -317,6 +316,15 @@ async function discoverAgents(args) {
 
 async function configureDispatcher(args) {
   const existing = await readConfig();
+  const nextSafety = {
+    ...existing.safety,
+    launchExternalAgents: typeof args.launchExternalAgents === "boolean"
+      ? args.launchExternalAgents
+      : existing.safety.launchExternalAgents,
+    allowBypassPermissions: typeof args.allowBypassPermissions === "boolean"
+      ? args.allowBypassPermissions
+      : existing.safety.allowBypassPermissions
+  };
   const next = {
     ...existing,
     defaultAgent: Object.prototype.hasOwnProperty.call(args, "defaultAgent")
@@ -332,6 +340,7 @@ async function configureDispatcher(args) {
     allowCurrentDirectory: typeof args.allowCurrentDirectory === "boolean"
       ? args.allowCurrentDirectory
       : existing.allowCurrentDirectory,
+    safety: nextSafety,
     updatedAt: new Date().toISOString()
   };
   await writeJson(CONFIG_PATH, next);
@@ -351,9 +360,19 @@ async function createJob(args) {
   const config = await readConfig();
   const registry = await readRegistry();
   const mode = args.mode ?? "implementation";
+  const permissionProfile = args.permissionProfile ?? config.safety.defaultPermissionProfile;
+  if (permissionProfile === "bypass_permissions" && !config.safety.allowBypassPermissions) {
+    return {
+      status: "failed",
+      error: "bypass_permissions_disabled",
+      message: "The dispatcher config does not allow bypass_permissions by default."
+    };
+  }
+
+  const availableAgents = await discoverAgents({ includeNotInstalled: false }).then((value) => value.agents);
   const selected = args.agent
     ? { agentId: args.agent, reason: "agent explicitly requested" }
-    : chooseAgent(await discoverAgents({ includeNotInstalled: false }).then((value) => value.agents), config, mode);
+    : chooseAgent(availableAgents, config, mode);
   if (!selected.agentId) {
     return {
       status: "failed",
@@ -361,10 +380,55 @@ async function createJob(args) {
       message: "No available agent was configured or discovered. Use discover_coding_agents first."
     };
   }
+  const selectedAgent = availableAgents.find((agent) => agent.id === selected.agentId);
+  if (!selectedAgent || selectedAgent.status !== "available") {
+    return {
+      status: "failed",
+      error: "agent_unavailable",
+      agentId: selected.agentId,
+      message: "The requested agent is not currently available. Use discover_coding_agents to inspect status."
+    };
+  }
+
+  const activeConflict = findActiveWorktreeJob(registry, args.worktree, permissionProfile);
+  if (activeConflict) {
+    return {
+      status: "failed",
+      error: "worktree_locked",
+      jobId: activeConflict.jobId,
+      message: "Another writable dispatcher job is already active for this worktree."
+    };
+  }
 
   const now = new Date().toISOString();
   const jobId = createId("job");
   const sessionId = args.sessionId || createId(`sess_${selected.agentId}`);
+  const logPath = path.join(LOG_DIR, `${jobId}.jsonl`);
+  const worktreeState = args.collectDiff === false
+    ? { skipped: true, reason: "collectDiff disabled" }
+    : await collectWorktreeState(args.worktree);
+  const launchingEnabled = config.safety.launchExternalAgents === true;
+  const status = launchingEnabled ? "failed" : "completed";
+  const endedAt = new Date().toISOString();
+  const adapterStatus = launchingEnabled ? "adapter_not_implemented" : "record_only";
+  const resultSummary = launchingEnabled
+    ? "External launch was requested, but runtime adapters are not implemented yet."
+    : "Recorded dispatcher job, selected agent, session binding, and current worktree state without launching an external process.";
+  const risks = launchingEnabled
+    ? ["External launch adapters are not implemented yet."]
+    : ["No external agent process was launched in this alpha build."];
+  const recentEvents = [
+    {
+      type: "job_created",
+      timestamp: now,
+      message: "Job recorded in local dispatcher registry."
+    },
+    {
+      type: adapterStatus,
+      timestamp: endedAt,
+      message: resultSummary
+    }
+  ];
   const session = registry.sessions[sessionId] ?? {
     sessionId,
     providerSessionId: null,
@@ -383,31 +447,26 @@ async function createJob(args) {
     jobId,
     sessionId,
     agentId: selected.agentId,
-    status: args.async === false ? "completed" : "queued",
+    status,
     worktree: args.worktree,
     mode,
-    permissionProfile: args.permissionProfile ?? "workspace_write",
+    permissionProfile,
     collectDiff: args.collectDiff !== false,
     promptPreview: preview(args.prompt, 160),
     promptHash: await hashText(args.prompt),
     startedAt: now,
-    endedAt: args.async === false ? now : null,
+    endedAt,
     timeoutSec: args.timeoutSec ?? 3600,
     metadata: isPlainObject(args.metadata) ? args.metadata : {},
-    resultSummary: args.async === false
-      ? "Stub dispatcher completed without launching an external agent."
-      : null,
+    resultSummary,
     changedFiles: [],
     validation: [],
-    risks: ["External agent adapters are not implemented in this V1 scaffold."],
-    logPath: path.join(DATA_DIR, "logs", `${jobId}.jsonl`),
-    recentEvents: [
-      {
-        type: "dispatcher_stub",
-        timestamp: now,
-        message: "Job recorded in local registry; no external process was launched."
-      }
-    ]
+    risks,
+    logPath,
+    adapterStatus,
+    selectionReason: selected.reason,
+    worktreeState,
+    recentEvents
   };
 
   session.updatedAt = now;
@@ -415,6 +474,7 @@ async function createJob(args) {
   registry.sessions[sessionId] = session;
   registry.jobs[jobId] = job;
   await writeRegistry(registry);
+  await appendJsonl(logPath, recentEvents.map((event) => ({ ...event, jobId, sessionId, agentId: selected.agentId })));
 
   return {
     jobId,
@@ -423,9 +483,16 @@ async function createJob(args) {
     status: job.status,
     worktree: args.worktree,
     startedAt: now,
-    message: `${selected.agentId} job recorded by dispatcher stub. Use get_coding_agent_job to inspect it.`,
-    adapterStatus: "stub",
-    selectionReason: selected.reason
+    endedAt,
+    summary: resultSummary,
+    changedFiles: [],
+    validation: [],
+    risks,
+    logPath,
+    worktreeState,
+    adapterStatus,
+    selectionReason: selected.reason,
+    message: `${selected.agentId} job recorded by dispatcher alpha. Use get_coding_agent_job to inspect it.`
   };
 }
 
@@ -464,6 +531,7 @@ async function cancelJob(args) {
       }
     ];
     await writeRegistry(registry);
+    await appendJsonl(job.logPath, job.recentEvents.slice(-1).map((event) => ({ ...event, jobId: job.jobId, sessionId: job.sessionId, agentId: job.agentId })));
   }
   return { jobId: job.jobId, status: job.status };
 }
@@ -514,7 +582,7 @@ async function archiveSession(args) {
 }
 
 async function readConfig() {
-  return readJson(CONFIG_PATH, {
+  const defaults = {
     defaultAgent: null,
     modeDefaults: {},
     disabledAgents: [],
@@ -523,10 +591,21 @@ async function readConfig() {
       requireAbsoluteWorktree: true,
       launchExternalAgents: false,
       defaultPermissionProfile: "workspace_write",
-      bypassPermissionsDefault: false
+      allowBypassPermissions: false
     },
     updatedAt: null
-  });
+  };
+  const stored = await readJson(CONFIG_PATH, defaults);
+  return {
+    ...defaults,
+    ...stored,
+    modeDefaults: isPlainObject(stored.modeDefaults) ? stored.modeDefaults : defaults.modeDefaults,
+    disabledAgents: Array.isArray(stored.disabledAgents) ? stored.disabledAgents : defaults.disabledAgents,
+    safety: {
+      ...defaults.safety,
+      ...(isPlainObject(stored.safety) ? stored.safety : {})
+    }
+  };
 }
 
 async function readRegistry() {
@@ -552,6 +631,12 @@ async function writeJson(filePath, payload) {
   await fs.writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
+async function appendJsonl(filePath, entries) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const lines = entries.map((entry) => JSON.stringify(entry)).join("\n");
+  await fs.appendFile(filePath, `${lines}\n`, "utf8");
+}
+
 async function validateWorktree(worktree) {
   if (typeof worktree !== "string" || !worktree.trim()) {
     return { ok: false, reason: "worktree_required" };
@@ -573,13 +658,122 @@ async function findExecutable(binary, pathEntries) {
   for (const entry of pathEntries) {
     const candidate = path.join(entry, binary);
     try {
-      await fs.access(candidate, fs.constants.X_OK);
+      await fs.access(candidate, fsConstants.X_OK);
       return candidate;
     } catch {
       continue;
     }
   }
   return null;
+}
+
+async function probeAgent(agent, config, pathEntries) {
+  const installedPath = await findExecutable(agent.executable, pathEntries);
+  const disabled = config.disabledAgents.includes(agent.id);
+  const notes = installedPath ? [`Found at ${installedPath}`] : agent.notes;
+  const versionProbe = installedPath
+    ? await probeVersion(installedPath, agent.versionArgs)
+    : { version: null, note: null };
+  if (versionProbe.note) notes.push(versionProbe.note);
+  return {
+    id: agent.id,
+    displayName: agent.displayName,
+    status: disabled ? "disabled" : installedPath ? "available" : "not_installed",
+    version: versionProbe.version,
+    transport: agent.transport,
+    command: agent.command,
+    source: agent.source,
+    capabilities: agent.capabilities,
+    icon: null,
+    notes
+  };
+}
+
+async function probeVersion(executablePath, versionArgs) {
+  try {
+    const { stdout, stderr } = await execFileAsync(executablePath, versionArgs, {
+      timeout: COMMAND_TIMEOUT_MS,
+      windowsHide: true,
+      env: safeEnv()
+    });
+    const output = `${stdout}\n${stderr}`.trim();
+    return {
+      version: output.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? null,
+      note: null
+    };
+  } catch (error) {
+    return {
+      version: null,
+      note: `Version probe failed: ${error.code ?? error.message}`
+    };
+  }
+}
+
+async function collectWorktreeState(worktree) {
+  const gitRoot = await runGit(worktree, ["rev-parse", "--show-toplevel"]);
+  if (!gitRoot.ok) {
+    return {
+      isGitRepository: false,
+      currentBranch: null,
+      preExistingChangedFiles: [],
+      note: "Worktree is not a git repository or git is unavailable."
+    };
+  }
+  const branch = await runGit(worktree, ["branch", "--show-current"]);
+  const status = await runGit(worktree, ["status", "--porcelain=v1"]);
+  return {
+    isGitRepository: true,
+    gitRoot: gitRoot.stdout.trim(),
+    currentBranch: branch.ok ? branch.stdout.trim() || null : null,
+    preExistingChangedFiles: status.ok ? parseGitStatusFiles(status.stdout) : [],
+    statusProbeError: status.ok ? null : status.error
+  };
+}
+
+async function runGit(cwd, args) {
+  try {
+    const { stdout, stderr } = await execFileAsync("git", args, {
+      cwd,
+      timeout: COMMAND_TIMEOUT_MS,
+      windowsHide: true,
+      env: safeEnv()
+    });
+    return { ok: true, stdout, stderr };
+  } catch (error) {
+    return {
+      ok: false,
+      stdout: error.stdout ?? "",
+      stderr: error.stderr ?? "",
+      error: error.message
+    };
+  }
+}
+
+function parseGitStatusFiles(stdout) {
+  return stdout
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .map((line) => line.slice(3).replace(/^.* -> /, ""))
+    .filter(Boolean);
+}
+
+function findActiveWorktreeJob(registry, worktree, permissionProfile) {
+  if (permissionProfile === "plan") return null;
+  return Object.values(registry.jobs).find((job) => (
+    job.worktree === worktree
+    && job.permissionProfile !== "plan"
+    && ["queued", "starting", "running"].includes(job.status)
+  )) ?? null;
+}
+
+function safeEnv() {
+  return {
+    PATH: process.env.PATH ?? "",
+    HOME: process.env.HOME ?? os.homedir(),
+    LANG: process.env.LANG ?? "C.UTF-8",
+    LC_ALL: process.env.LC_ALL ?? "C.UTF-8"
+  };
 }
 
 function chooseAgent(agents, config, mode) {
