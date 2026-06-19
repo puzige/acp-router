@@ -8,7 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const SERVER_NAME = "acp-coding-agent-dispatcher";
-const SERVER_VERSION = "0.5.1";
+const SERVER_VERSION = "0.5.2";
 const DATA_DIR = process.env.AGENT_DISPATCHER_DATA_DIR
   ? path.resolve(process.env.AGENT_DISPATCHER_DATA_DIR)
   : path.join(os.homedir(), ".codex", "agent-dispatcher");
@@ -572,12 +572,72 @@ function createRunController(jobId) {
     cancelRequested: false,
     cancelReason: null,
     cancelProcess: null,
+    processInfo: null,
+    async recordProcess(processInfo) {
+      const normalized = normalizeProcessInfo(processInfo);
+      if (!normalized) return;
+      this.processInfo = normalized;
+      await recordJobProcess(this.jobId, normalized);
+    },
     cancel(reason) {
       this.cancelRequested = true;
       this.cancelReason = reason || "Cancelled by dispatcher caller.";
-      if (typeof this.cancelProcess === "function") this.cancelProcess();
+      if (typeof this.cancelProcess === "function") {
+        return Boolean(this.cancelProcess());
+      }
+      return false;
     }
   };
+}
+
+function normalizeProcessInfo(processInfo) {
+  if (!isPlainObject(processInfo)) return null;
+  const pid = normalizePid(processInfo.pid);
+  if (!pid) return null;
+  const now = new Date().toISOString();
+  return {
+    pid,
+    kind: typeof processInfo.kind === "string" && processInfo.kind ? processInfo.kind : "external",
+    command: typeof processInfo.command === "string" && processInfo.command ? processInfo.command : null,
+    startedAt: typeof processInfo.startedAt === "string" ? processInfo.startedAt : now,
+    recordedAt: now,
+    status: "running"
+  };
+}
+
+function normalizePid(value) {
+  const pid = Number.parseInt(value, 10);
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  return pid;
+}
+
+async function recordJobProcess(jobId, processInfo) {
+  const registry = await readRegistry();
+  const job = registry.jobs[jobId];
+  if (!isPlainObject(job) || TERMINAL_JOB_STATUSES.has(job.status)) return;
+  const event = {
+    type: "process_started",
+    timestamp: processInfo.recordedAt,
+    message: `Recorded external agent process pid=${processInfo.pid}.`,
+    process: {
+      pid: processInfo.pid,
+      kind: processInfo.kind,
+      command: processInfo.command
+    }
+  };
+  job.process = {
+    ...(isPlainObject(job.process) ? job.process : {}),
+    ...processInfo
+  };
+  job.recentEvents = [...(Array.isArray(job.recentEvents) ? job.recentEvents : []), event];
+  registry.jobs[job.jobId] = job;
+  await writeRegistry(registry);
+  await appendJsonl(job.logPath, [{
+    ...event,
+    jobId: job.jobId,
+    sessionId: job.sessionId,
+    agentId: job.agentId
+  }]);
 }
 
 async function persistJobRunResult({ job, session, selectedAgent, runResult }) {
@@ -593,7 +653,15 @@ async function persistJobRunResult({ job, session, selectedAgent, runResult }) {
       risks: currentJob.risks ?? []
     }
     : runResult.jobPatch;
+  const processRecord = isPlainObject(currentJob.process) ? { ...currentJob.process } : null;
   Object.assign(currentJob, jobPatch);
+  if (processRecord) {
+    currentJob.process = {
+      ...processRecord,
+      status: currentJob.status,
+      endedAt: processRecord.endedAt ?? currentJob.endedAt ?? new Date().toISOString()
+    };
+  }
   Object.assign(currentSession, runResult.sessionPatch);
   currentJob.recentEvents = [...(currentJob.recentEvents ?? []), ...runResult.events];
   currentSession.updatedAt = currentJob.endedAt;
@@ -666,15 +734,26 @@ async function cancelJob(args) {
   const job = registry.jobs[args.jobId];
   if (!job) return { jobId: args.jobId, status: "not_found" };
   let activeProcessCancelled = false;
+  let activeProcessInfo = null;
   if (!TERMINAL_JOB_STATUSES.has(job.status)) {
     const activeRun = ACTIVE_RUNS.get(job.jobId);
     if (activeRun) {
-      activeProcessCancelled = true;
-      activeRun.cancel(args.reason || "Cancelled by dispatcher caller.");
+      activeProcessInfo = activeRun.processInfo;
+      activeProcessCancelled = activeRun.cancel(args.reason || "Cancelled by dispatcher caller.");
     }
     job.status = "cancelled";
     job.endedAt = new Date().toISOString();
     job.resultSummary = args.reason || "Cancelled by dispatcher caller.";
+    if (isPlainObject(job.process) || isPlainObject(activeProcessInfo)) {
+      job.process = {
+        ...(isPlainObject(job.process) ? job.process : {}),
+        ...(isPlainObject(activeProcessInfo) ? activeProcessInfo : {}),
+        status: "cancelled",
+        killSignal: "SIGTERM",
+        killRequestedAt: job.endedAt,
+        killStatus: activeProcessCancelled ? "signal_sent" : "not_owned_by_current_server"
+      };
+    }
     job.recentEvents = [
       ...(job.recentEvents ?? []),
       {
@@ -794,20 +873,34 @@ async function recoverOrphanedJobs() {
     if (!isPlainObject(job)) continue;
     if (!ACTIVE_JOB_STATUSES.has(job.status) || ACTIVE_RUNS.has(job.jobId)) continue;
     const previousStatus = job.status;
-    const message = "Dispatcher marked this job orphaned during MCP server restart recovery; the previous runner process is no longer owned by this server.";
+    const processKill = bestEffortKillJobProcess(job, recoveredAt);
+    const message = processKill?.status === "signal_sent"
+      ? "Dispatcher marked this job orphaned during MCP server restart recovery and sent SIGTERM to the recorded child process."
+      : "Dispatcher marked this job orphaned during MCP server restart recovery; the previous runner process is no longer owned by this server.";
     const event = {
       type: "orphaned",
       timestamp: recoveredAt,
       message,
-      previousStatus
+      previousStatus,
+      processKill
     };
     job.status = "orphaned";
     job.endedAt = job.endedAt ?? recoveredAt;
     job.orphanedAt = recoveredAt;
     job.failureReason = message;
     job.resultSummary = message;
+    if (processKill && isPlainObject(job.process)) {
+      job.process = {
+        ...job.process,
+        status: processKill.status === "signal_sent" ? "kill_requested" : "unowned",
+        restartKill: processKill,
+        endedAt: job.process.endedAt ?? recoveredAt
+      };
+    }
     job.risks = [
-      "The original agent process may have continued after the MCP server exited; inspect the worktree if results look unexpected."
+      processKill?.status === "signal_sent"
+        ? "Dispatcher sent SIGTERM to the recorded child PID during restart recovery; inspect the worktree if results look unexpected."
+        : "The original agent process may have continued after the MCP server exited; inspect the worktree if results look unexpected."
     ];
     job.recentEvents = [...(Array.isArray(job.recentEvents) ? job.recentEvents : []), event];
     updateSessionAfterOrphanedJob(registry, job, recoveredAt);
@@ -834,6 +927,30 @@ async function recoverOrphanedJobs() {
     await appendJsonl(entry.logPath, [entry.event]);
   }
   return { recoveredCount };
+}
+
+function bestEffortKillJobProcess(job, attemptedAt) {
+  const pid = normalizePid(job.process?.pid);
+  if (!pid) return null;
+  const result = {
+    pid,
+    signal: "SIGTERM",
+    attemptedAt,
+    status: "unknown"
+  };
+  try {
+    process.kill(pid, "SIGTERM");
+    return { ...result, status: "signal_sent" };
+  } catch (error) {
+    if (error.code === "ESRCH") return { ...result, status: "not_found" };
+    if (error.code === "EPERM") return { ...result, status: "permission_denied" };
+    return {
+      ...result,
+      status: "error",
+      errorCode: error.code ?? null,
+      errorMessage: error.message
+    };
+  }
 }
 
 function updateSessionAfterOrphanedJob(registry, job, recoveredAt) {
@@ -1113,10 +1230,19 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
     cwd: args.worktree,
     timeoutMs: timeoutSec * 1000,
     env: agentEnv,
-    onEvent: (event) => events.push(event)
+    onEvent: (event) => events.push(event),
+    onProcessStart: (child) => controller?.recordProcess({
+      pid: child.pid,
+      kind: "acp_stdio",
+      command: path.basename(selectedAgent.installedPath ?? selectedAgent.executable ?? "opencode"),
+      startedAt: new Date().toISOString()
+    })
   });
   if (controller) {
-    controller.cancelProcess = () => client.dispose();
+    controller.cancelProcess = () => {
+      client.dispose();
+      return true;
+    };
   }
 
   try {
@@ -1512,9 +1638,21 @@ function runCliProcess({ command, args, cwd, timeoutMs, env, controller }) {
     let timedOut = false;
     let processError = null;
     let settled = false;
+    if (controller && typeof controller.recordProcess === "function") {
+      controller.recordProcess({
+        pid: child.pid,
+        kind: "cli",
+        command: path.basename(command),
+        startedAt: new Date().toISOString()
+      }).catch(() => {});
+    }
     if (controller) {
       controller.cancelProcess = () => {
-        if (!settled && !child.killed) child.kill("SIGTERM");
+        if (!settled && !child.killed) {
+          child.kill("SIGTERM");
+          return true;
+        }
+        return false;
       };
       if (controller.cancelRequested) controller.cancelProcess();
     }
@@ -1551,13 +1689,14 @@ function appendLimited(current, chunk, maxLength) {
 }
 
 class AcpStdioClient {
-  constructor({ command, args, cwd, timeoutMs, env, onEvent }) {
+  constructor({ command, args, cwd, timeoutMs, env, onEvent, onProcessStart }) {
     this.command = command;
     this.args = args;
     this.cwd = cwd;
     this.timeoutMs = timeoutMs;
     this.env = env ?? safeEnv();
     this.onEvent = onEvent;
+    this.onProcessStart = onProcessStart;
     this.nextId = 1;
     this.pending = new Map();
     this.stdoutBuffer = "";
@@ -1574,6 +1713,15 @@ class AcpStdioClient {
     });
     this.child.stdout.setEncoding("utf8");
     this.child.stderr.setEncoding("utf8");
+    if (typeof this.onProcessStart === "function") {
+      await Promise.resolve(this.onProcessStart(this.child)).catch((error) => {
+        this.logEvents.push({
+          type: "process_record_error",
+          timestamp: new Date().toISOString(),
+          message: `Failed to record ACP process pid: ${error.message}`
+        });
+      });
+    }
     this.child.stdout.on("data", (chunk) => this.handleStdout(chunk));
     this.child.stderr.on("data", (chunk) => this.handleStderr(chunk));
     this.child.on("error", (error) => {

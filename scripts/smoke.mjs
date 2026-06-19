@@ -33,7 +33,7 @@ try {
 
   if (
     result.stderr
-    || result.serverVersion !== "0.5.1"
+    || result.serverVersion !== "0.5.2"
     || result.discoveryCount < 1
     || result.runStatus !== "completed"
     || result.adapterStatus !== "opencode_acp"
@@ -57,11 +57,17 @@ try {
     || result.cancelStatus !== "cancelled"
     || result.cancelActiveProcessCancelled !== true
     || result.cancelledJobStatus !== "cancelled"
+    || result.cancelledProcessStatus !== "cancelled"
+    || result.cancelledProcessKillStatus !== "signal_sent"
     || result.orphanStartStatus !== "running"
+    || !Number.isInteger(result.orphanProcessPid)
+    || result.orphanStartRecordedProcessPid !== result.orphanProcessPid
     || result.orphanRecoveredStatus !== "orphaned"
     || !result.orphanRecoveredSummary?.includes("orphaned")
     || !result.orphanRecoveredEvents?.includes("orphaned")
     || result.orphanRecoveredSessionStatus !== "orphaned"
+    || result.orphanRecoveredProcessKillStatus !== "signal_sent"
+    || result.orphanProcessKilled !== true
     || result.restartFollowupStatus !== "completed"
     || result.restartFollowupAdapterStatus !== "claude_cli"
   ) {
@@ -329,6 +335,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile) {
     }
   });
   await waitForMessage(() => parseMessages(first.stdout).find((message) => message.id === 11), 3000);
+  const pidCountBeforeOrphan = (await readRecordedPids(pidFile)).length;
   send(child, {
     jsonrpc: "2.0",
     id: 12,
@@ -347,6 +354,19 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile) {
   });
   const orphanStart = await waitForMessage(() => parseMessages(first.stdout).find((message) => message.id === 12), 3000);
   const orphanStartResult = parseToolResult(orphanStart);
+  const orphanProcessPid = await waitForRecordedPid(pidFile, pidCountBeforeOrphan, 3000);
+  send(child, {
+    jsonrpc: "2.0",
+    id: 13,
+    method: "tools/call",
+    params: {
+      name: "get_coding_agent_job",
+      arguments: {
+        jobId: orphanStartResult?.jobId
+      }
+    }
+  });
+  await waitForMessage(() => parseMessages(first.stdout).find((message) => message.id === 13), 3000);
   child.kill("SIGKILL");
   await waitForExit(child, 3000);
 
@@ -373,6 +393,9 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile) {
     }
   });
   await waitForMessage(() => parseMessages(second.stdout).find((message) => message.id === 102), 3000);
+  const orphanProcessKilled = orphanProcessPid
+    ? await waitForPidExit(orphanProcessPid, 3000)
+    : false;
   send(second.child, {
     jsonrpc: "2.0",
     id: 103,
@@ -449,11 +472,17 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile) {
     cancelStatus: parsedToolResults[10]?.status,
     cancelActiveProcessCancelled: parsedToolResults[10]?.activeProcessCancelled,
     cancelledJobStatus: parsedToolResults[11]?.job?.status,
+    cancelledProcessStatus: parsedToolResults[11]?.job?.process?.status,
+    cancelledProcessKillStatus: parsedToolResults[11]?.job?.process?.killStatus,
     orphanStartStatus: parsedToolResults[12]?.status,
     orphanStartJobId: parsedToolResults[12]?.jobId,
+    orphanProcessPid,
+    orphanStartRecordedProcessPid: parsedToolResults[13]?.job?.process?.pid,
     orphanRecoveredStatus: parsedRestartToolResults[102]?.job?.status,
     orphanRecoveredSummary: parsedRestartToolResults[102]?.job?.resultSummary,
     orphanRecoveredEvents: parsedRestartToolResults[102]?.job?.recentEvents?.map((event) => event.type),
+    orphanRecoveredProcessKillStatus: parsedRestartToolResults[102]?.job?.process?.restartKill?.status,
+    orphanProcessKilled,
     orphanRecoveredSessionStatus: parsedRestartToolResults[103]?.sessions
       ?.find((session) => session.lastJobId === parsedToolResults[12]?.jobId)?.status,
     restartFollowupStatus: parsedRestartToolResults[104]?.status,
@@ -510,17 +539,51 @@ async function waitForExit(child, timeoutMs) {
   ]);
 }
 
-async function killRecordedPids(pidFile) {
+async function readRecordedPids(pidFile) {
   let raw = "";
   try {
     raw = await readFile(pidFile, "utf8");
   } catch (error) {
-    if (error.code === "ENOENT") return;
+    if (error.code === "ENOENT") return [];
     throw error;
   }
-  for (const value of raw.split(/\r?\n/)) {
-    const pid = Number.parseInt(value, 10);
-    if (!Number.isFinite(pid) || pid <= 0) continue;
+  return raw
+    .split(/\r?\n/)
+    .map((value) => Number.parseInt(value, 10))
+    .filter((pid) => Number.isFinite(pid) && pid > 0);
+}
+
+async function waitForRecordedPid(pidFile, previousCount, timeoutMs) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const pids = await readRecordedPids(pidFile);
+    if (pids.length > previousCount) return pids[previousCount];
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return null;
+}
+
+async function waitForPidExit(pid, timeoutMs) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (!pidIsAlive(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return !pidIsAlive(pid);
+}
+
+function pidIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+    return true;
+  }
+}
+
+async function killRecordedPids(pidFile) {
+  for (const pid of await readRecordedPids(pidFile)) {
     try {
       process.kill(pid, "SIGTERM");
     } catch {
