@@ -45,7 +45,7 @@ async function handshake(cwd) {
       clientInfo: {
         name: "agent-router-smoke",
         title: "Agent Router Smoke",
-        version: "0.6.7"
+        version: "0.6.8"
       }
     }
   });

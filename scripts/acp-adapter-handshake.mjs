@@ -66,7 +66,7 @@ async function handshakeAdapter(adapter, worktree) {
       clientInfo: {
         name: "agent-router-acp-handshake-smoke",
         title: "Agent Router ACP Handshake Smoke",
-        version: "0.6.7"
+        version: "0.6.8"
       }
     });
     session = await client.request("session/new", {

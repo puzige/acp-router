@@ -48,7 +48,7 @@ try {
 
   if (
     result.stderr
-    || result.serverVersion !== "0.6.7"
+    || result.serverVersion !== "0.6.8"
     || result.discoveryCount < 1
     || result.registryStatus !== "fetched"
     || result.codexRegistryId !== "codex-acp"

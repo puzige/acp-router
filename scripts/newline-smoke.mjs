@@ -64,7 +64,7 @@ try {
   console.log(JSON.stringify(result, null, 2));
   if (
     result.stderr
-    || result.serverVersion !== "0.6.7"
+    || result.serverVersion !== "0.6.8"
     || result.usedContentLengthOutput
     || !result.hasDiscoverCodingAgents
     || !result.hasRunCodingAgent
