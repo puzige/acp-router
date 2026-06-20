@@ -34,16 +34,19 @@ async function main() {
       capabilities: {},
       clientInfo: { name: "opencode-acp-session-list-smoke", version: "0.0.0" }
     });
-    await client.callTool("configure_coding_agent_dispatcher", {
+    await client.callTool("manage_config", {
+      action: "set",
       launchExternalAgents: true
     });
-    const listResult = await client.callTool("list_coding_agent_sessions", {
+    const listResult = await client.callTool("manage_sessions", {
+      action: "list",
       agent: "opencode",
       worktree: tempWorktree,
       includeArchived: true,
       limit: 20
     }, 20_000);
-    await client.callTool("configure_coding_agent_dispatcher", {
+    await client.callTool("manage_config", {
+      action: "set",
       launchExternalAgents: false
     });
 
@@ -95,7 +98,7 @@ class McpClient {
   }
 
   async start() {
-    this.child = spawn(process.execPath, ["./mcp/server.mjs"], {
+    this.child = spawn(process.execPath, ["./bin/agent-router.mjs"], {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: this.env
@@ -136,28 +139,23 @@ class McpClient {
   }
 
   write(payload) {
-    const body = JSON.stringify(payload);
-    this.child.stdin.write(`Content-Length: ${Buffer.byteLength(body, "utf8")}\r\n\r\n${body}`);
+    this.child.stdin.write(`${JSON.stringify(payload)}\n`);
   }
 
   handleStdout(chunk) {
     this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
     while (true) {
-      const headerEnd = this.stdoutBuffer.indexOf("\r\n\r\n");
-      if (headerEnd === -1) return;
-      const header = this.stdoutBuffer.subarray(0, headerEnd).toString("utf8");
-      const match = /^Content-Length:\s*(\d+)$/im.exec(header);
-      if (!match) {
-        this.rejectAll(new Error(`Malformed MCP response header: ${header}`));
+      const newlineIndex = this.stdoutBuffer.indexOf("\n");
+      if (newlineIndex === -1) return;
+      const line = this.stdoutBuffer.subarray(0, newlineIndex).toString("utf8").replace(/\r$/, "").trim();
+      this.stdoutBuffer = this.stdoutBuffer.subarray(newlineIndex + 1);
+      if (!line) continue;
+      try {
+        this.handleMessage(JSON.parse(line));
+      } catch (error) {
+        this.rejectAll(new Error(`Malformed MCP response line: ${line}`));
         return;
       }
-      const length = Number(match[1]);
-      const bodyStart = headerEnd + 4;
-      const bodyEnd = bodyStart + length;
-      if (this.stdoutBuffer.length < bodyEnd) return;
-      const raw = this.stdoutBuffer.subarray(bodyStart, bodyEnd).toString("utf8");
-      this.stdoutBuffer = this.stdoutBuffer.subarray(bodyEnd);
-      this.handleMessage(JSON.parse(raw));
     }
   }
 

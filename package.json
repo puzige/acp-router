@@ -1,12 +1,32 @@
 {
   "name": "agent-router",
-  "version": "0.6.8",
-  "private": true,
+  "version": "0.7.0",
+  "description": "Generic MCP server for routing coding tasks to local ACP agents. Works with any MCP client (Claude Desktop, Cursor, Windsurf, Codex, etc.).",
+  "license": "MIT",
+  "author": {
+    "name": "peanut996"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/peanut996/agent-router.git"
+  },
+  "keywords": [
+    "mcp",
+    "acp",
+    "agent",
+    "router",
+    "coding-agents",
+    "model-context-protocol"
+  ],
   "type": "module",
-  "description": "Local Codex plugin for routing coding tasks to ACP and CLI coding agents.",
+  "bin": {
+    "agent-router": "./bin/agent-router.mjs"
+  },
+  "main": "./mcp/server.mjs",
   "scripts": {
+    "start": "node ./bin/agent-router.mjs",
     "start:mcp": "node ./mcp/server.mjs",
-    "check": "node --check ./mcp/server.mjs && node --check ./scripts/smoke.mjs && node --check ./scripts/newline-smoke.mjs && node --check ./scripts/session-lifecycle-smoke.mjs && node --check ./scripts/opencode-acp-handshake.mjs && node --check ./scripts/opencode-acp-session-list.mjs && node --check ./scripts/acp-adapter-handshake.mjs && node --check ./scripts/e2e-dispatcher.mjs && node --check ./scripts/e2e-session-lifecycle.mjs && node --check ./scripts/e2e-restart-recovery.mjs",
+    "check": "node --check ./bin/agent-router.mjs && node --check ./mcp/server.mjs && node --check ./scripts/smoke.mjs && node --check ./scripts/newline-smoke.mjs && node --check ./scripts/session-lifecycle-smoke.mjs && node --check ./scripts/opencode-acp-handshake.mjs && node --check ./scripts/opencode-acp-session-list.mjs && node --check ./scripts/acp-adapter-handshake.mjs && node --check ./scripts/e2e-dispatcher.mjs && node --check ./scripts/e2e-session-lifecycle.mjs && node --check ./scripts/e2e-restart-recovery.mjs",
     "smoke": "node ./scripts/smoke.mjs",
     "smoke:newline": "node ./scripts/newline-smoke.mjs",
     "smoke:sessions": "node ./scripts/session-lifecycle-smoke.mjs",
@@ -20,6 +40,9 @@
     "e2e:claude": "node ./scripts/e2e-dispatcher.mjs --agent claude",
     "e2e:cursor": "node ./scripts/e2e-dispatcher.mjs --agent cursor-agent",
     "e2e:codex": "node ./scripts/e2e-dispatcher.mjs --agent codex"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "engines": {
     "node": ">=18"

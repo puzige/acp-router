@@ -16,7 +16,7 @@ const state = {
 };
 
 try {
-  state.child = spawn("node", ["./mcp/server.mjs"], {
+  state.child = spawn("node", ["./bin/agent-router.mjs"], {
     cwd: repoRoot,
     stdio: ["pipe", "pipe", "pipe"],
     env: {
@@ -56,15 +56,15 @@ try {
     serverVersion: init?.result?.serverInfo?.version,
     toolCount: toolsList?.result?.tools?.length ?? 0,
     usedContentLengthOutput: state.stdout.includes("Content-Length:"),
-    hasDiscoverCodingAgents: toolNames.has("discover_coding_agents"),
-    hasRunCodingAgent: toolNames.has("run_coding_agent"),
-    hasTailJobEvents: toolNames.has("tail_coding_agent_job_events")
+    hasDiscoverCodingAgents: toolNames.has("discover_agents"),
+    hasRunCodingAgent: toolNames.has("run_agent"),
+    hasTailJobEvents: toolNames.has("tail_job_events")
   };
 
   console.log(JSON.stringify(result, null, 2));
   if (
     result.stderr
-    || result.serverVersion !== "0.6.8"
+    || result.serverVersion !== "0.7.0"
     || result.usedContentLengthOutput
     || !result.hasDiscoverCodingAgents
     || !result.hasRunCodingAgent

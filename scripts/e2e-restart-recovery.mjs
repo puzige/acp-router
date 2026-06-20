@@ -43,7 +43,8 @@ async function main() {
     firstClient = new McpClient({ cwd: repoRoot, env });
     await firstClient.start();
     await initialize(firstClient, "restart-recovery-e2e-first");
-    const enabledConfig = await firstClient.callTool("configure_coding_agent_dispatcher", {
+    const enabledConfig = await firstClient.callTool("manage_config", {
+      action: "set",
       launchExternalAgents: true,
       inheritEnvironment: true
     });
@@ -53,7 +54,7 @@ async function main() {
       enabledConfig
     );
 
-    const discovery = await firstClient.callTool("discover_coding_agents", {
+    const discovery = await firstClient.callTool("discover_agents", {
       includeNotInstalled: false
     });
     const claude = discovery.agents?.find((agent) => agent.id === "claude");
@@ -63,7 +64,7 @@ async function main() {
       discovery
     );
 
-    const asyncJob = await firstClient.callTool("run_coding_agent", {
+    const asyncJob = await firstClient.callTool("run_agent", {
       agent: "claude",
       worktree,
       prompt: LONG_RUNNING_MARKER,
@@ -97,7 +98,7 @@ async function main() {
     await secondClient.start();
     await initialize(secondClient, "restart-recovery-e2e-second");
 
-    const recovered = await secondClient.callTool("get_coding_agent_job", {
+    const recovered = await secondClient.callTool("get_job", {
       jobId: asyncJob.jobId
     }, 5000);
     const recoveredJob = recovered.job;
@@ -119,7 +120,8 @@ async function main() {
       restartKill: recoveredJob.process?.restartKill
     });
 
-    const sessions = await secondClient.callTool("list_coding_agent_sessions", {
+    const sessions = await secondClient.callTool("manage_sessions", {
+      action: "list",
       agent: "claude",
       worktree,
       includeArchived: true
@@ -127,7 +129,7 @@ async function main() {
     const orphanedSession = sessions.sessions?.find((session) => session.sessionId === asyncJob.sessionId);
     assert(orphanedSession?.status === "orphaned", "Expected Agent Router session to be marked orphaned.", sessions);
 
-    const followup = await secondClient.callTool("run_coding_agent", {
+    const followup = await secondClient.callTool("run_agent", {
       agent: "claude",
       worktree,
       prompt: "Run restart recovery follow-up.",
@@ -155,7 +157,8 @@ async function main() {
     const note = await readFile(path.join(worktree, "note.txt"), "utf8");
     assert(note.includes(FOLLOWUP_LINE), "Expected follow-up fake Claude job to edit note.txt.", { note });
 
-    await secondClient.callTool("configure_coding_agent_dispatcher", {
+    await secondClient.callTool("manage_config", {
+      action: "set",
       launchExternalAgents: false
     }, 5000);
 
@@ -193,7 +196,8 @@ async function main() {
     process.exitCode = 1;
   } finally {
     if (secondClient) {
-      await secondClient.callTool("configure_coding_agent_dispatcher", {
+      await secondClient.callTool("manage_config", {
+        action: "set",
         launchExternalAgents: false
       }, 5000).catch(() => {});
     }
@@ -283,7 +287,7 @@ async function waitForJob(client, jobId, predicate, timeoutMs) {
   const startedAt = Date.now();
   let latest = null;
   while (Date.now() - startedAt < timeoutMs) {
-    latest = await client.callTool("get_coding_agent_job", { jobId }, 5000);
+    latest = await client.callTool("get_job", { jobId }, 5000);
     if (predicate(latest.job)) return latest.job;
     await sleep(50);
   }
@@ -373,7 +377,7 @@ class McpClient {
   }
 
   async start() {
-    this.child = spawn(process.execPath, ["./mcp/server.mjs"], {
+    this.child = spawn(process.execPath, ["./bin/agent-router.mjs"], {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: this.env
@@ -421,24 +425,23 @@ class McpClient {
   }
 
   write(payload) {
-    const body = JSON.stringify(payload);
-    this.child.stdin.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    this.child.stdin.write(`${JSON.stringify(payload)}\n`);
   }
 
   handleStdout(chunk) {
     this.buffer = Buffer.concat([this.buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
     while (true) {
-      const headerEnd = this.buffer.indexOf("\r\n\r\n");
-      if (headerEnd === -1) return;
-      const header = this.buffer.subarray(0, headerEnd).toString("utf8");
-      const match = /Content-Length:\s*(\d+)/i.exec(header);
-      if (!match) throw new Error(`Invalid MCP header: ${header}`);
-      const length = Number.parseInt(match[1], 10);
-      const bodyStart = headerEnd + 4;
-      const bodyEnd = bodyStart + length;
-      if (this.buffer.length < bodyEnd) return;
-      const message = JSON.parse(this.buffer.subarray(bodyStart, bodyEnd).toString("utf8"));
-      this.buffer = this.buffer.subarray(bodyEnd);
+      const newlineIndex = this.buffer.indexOf("\n");
+      if (newlineIndex === -1) return;
+      const line = this.buffer.subarray(0, newlineIndex).toString("utf8").replace(/\r$/, "").trim();
+      this.buffer = this.buffer.subarray(newlineIndex + 1);
+      if (!line) continue;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch (error) {
+        throw new Error(`Invalid MCP line: ${line}`);
+      }
       const pending = this.pending.get(message.id);
       if (!pending) continue;
       clearTimeout(pending.timer);

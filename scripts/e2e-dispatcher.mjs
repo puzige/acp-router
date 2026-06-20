@@ -45,10 +45,11 @@ try {
     capabilities: {},
     clientInfo: { name: "agent-router-e2e", version: "0.0.0" }
   });
-  const configResult = await client.callTool("configure_coding_agent_dispatcher", {
+  const configResult = await client.callTool("manage_config", {
+    action: "set",
     launchExternalAgents: true
   });
-  const discovery = await client.callTool("discover_coding_agents", {
+  const discovery = await client.callTool("discover_agents", {
     includeNotInstalled: false
   });
   const prompt = options.prompt ?? buildDefaultPrompt(expectedLine);
@@ -71,7 +72,8 @@ try {
     }
   });
   const runResult = runOutcome.result;
-  await client.callTool("configure_coding_agent_dispatcher", {
+  await client.callTool("manage_config", {
+    action: "set",
     launchExternalAgents: false
   });
 
@@ -186,7 +188,7 @@ function readValue(argv, index, name) {
 async function waitForRunOutcome({ client, dispatcherDataDir, args, timeoutMs }) {
   const pollState = { done: false };
   const mcpPromise = client
-    .callTool("run_coding_agent", args, timeoutMs)
+    .callTool("run_agent", args, timeoutMs)
     .then((result) => ({ source: "mcp_response", result }))
     .catch((error) => ({ source: "mcp_error", error }));
   const registryPromise = waitForLatestTerminalJob({ dispatcherDataDir, timeoutMs, pollState })
@@ -342,7 +344,7 @@ class McpClient {
   }
 
   async start() {
-    this.child = spawn("node", ["./mcp/server.mjs"], {
+    this.child = spawn("node", ["./bin/agent-router.mjs"], {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: this.env
@@ -386,24 +388,23 @@ class McpClient {
   }
 
   write(payload) {
-    const body = JSON.stringify(payload);
-    this.child.stdin.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    this.child.stdin.write(`${JSON.stringify(payload)}\n`);
   }
 
   handleStdout(chunk) {
     this.buffer = Buffer.concat([this.buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
     while (true) {
-      const headerEnd = this.buffer.indexOf("\r\n\r\n");
-      if (headerEnd === -1) return;
-      const header = this.buffer.subarray(0, headerEnd).toString("utf8");
-      const match = /Content-Length:\s*(\d+)/i.exec(header);
-      if (!match) throw new Error(`Invalid MCP header: ${header}`);
-      const length = Number.parseInt(match[1], 10);
-      const bodyStart = headerEnd + 4;
-      const bodyEnd = bodyStart + length;
-      if (this.buffer.length < bodyEnd) return;
-      const message = JSON.parse(this.buffer.subarray(bodyStart, bodyEnd).toString("utf8"));
-      this.buffer = this.buffer.subarray(bodyEnd);
+      const newlineIndex = this.buffer.indexOf("\n");
+      if (newlineIndex === -1) return;
+      const line = this.buffer.subarray(0, newlineIndex).toString("utf8").replace(/\r$/, "").trim();
+      this.buffer = this.buffer.subarray(newlineIndex + 1);
+      if (!line) continue;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch (error) {
+        throw new Error(`Invalid MCP line: ${line}`);
+      }
       const pending = this.pending.get(message.id);
       if (!pending) continue;
       clearTimeout(pending.timer);

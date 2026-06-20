@@ -6,14 +6,15 @@ import { execFile, spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
 
 const SERVER_NAME = "agent-router";
-const SERVER_VERSION = "0.6.8";
+const SERVER_VERSION = "0.7.0";
 const DATA_DIR = process.env.AGENT_ROUTER_DATA_DIR
   ? path.resolve(process.env.AGENT_ROUTER_DATA_DIR)
-  : process.env.AGENT_DISPATCHER_DATA_DIR
-    ? path.resolve(process.env.AGENT_DISPATCHER_DATA_DIR)
-    : path.join(os.homedir(), ".codex", "agent-router");
+  : path.join(os.homedir(), ".agent-router");
 const REGISTRY_PATH = path.join(DATA_DIR, "registry.json");
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
 const ACP_REGISTRY_CACHE_PATH = path.join(DATA_DIR, "acp-registry-cache.json");
@@ -27,176 +28,7 @@ const ACTIVE_JOB_STATUSES = new Set(["queued", "starting", "running"]);
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "timed_out", "orphaned"]);
 let orphanRecoveryPromise = null;
 
-const TOOL_DEFINITIONS = [
-  {
-    name: "discover_coding_agents",
-    description: "Discover local coding agents from safe PATH inspection and Agent Router configuration.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        refresh: { type: "boolean", default: false },
-        includeNotInstalled: { type: "boolean", default: true }
-      },
-      additionalProperties: false
-    }
-  },
-  {
-    name: "get_coding_agent_dispatcher_config",
-    description: "Read dispatcher default agent, per-mode defaults, disabled agents, and safety policy.",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      additionalProperties: false
-    }
-  },
-  {
-    name: "configure_coding_agent_dispatcher",
-    description: "Update Agent Router configuration in the local Codex agent-router config file.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        defaultAgent: { type: ["string", "null"] },
-        modeDefaults: { type: "object", additionalProperties: { type: "string" } },
-        disabledAgents: { type: "array", items: { type: "string" } },
-        allowCurrentDirectory: { type: "boolean" },
-        registryEnabled: { type: "boolean" },
-        registryUrl: { type: "string" },
-        registryCacheTtlSec: { type: "integer", minimum: 0 },
-        launchExternalAgents: { type: "boolean" },
-        allowBypassPermissions: { type: "boolean" },
-        inheritEnvironment: { type: "boolean" }
-      },
-      additionalProperties: false
-    }
-  },
-  {
-    name: "run_coding_agent",
-    description: "Create a tracked coding-agent job and collect safe local registry/log metadata.",
-    inputSchema: {
-      type: "object",
-      required: ["prompt", "worktree"],
-      properties: {
-        agent: { type: ["string", "null"] },
-        worktree: { type: "string" },
-        prompt: { type: "string" },
-        mode: { type: "string", default: "implementation" },
-        async: { type: "boolean", default: true },
-        sessionId: { type: ["string", "null"] },
-        timeoutSec: { type: "integer", minimum: 1, default: 3600 },
-        permissionProfile: {
-          type: "string",
-          enum: ["plan", "workspace_write", "accept_edits", "bypass_permissions"],
-          default: "workspace_write"
-        },
-        collectDiff: { type: "boolean", default: true },
-        launchExternalAgents: { type: "boolean", default: true },
-        inheritEnvironment: { type: "boolean", default: true },
-        metadata: { type: "object", additionalProperties: true }
-      },
-      additionalProperties: false
-    }
-  },
-  {
-    name: "list_coding_agent_jobs",
-    description: "List Agent Router jobs from the local registry.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        status: { type: ["string", "null"] },
-        agent: { type: ["string", "null"] },
-        worktree: { type: ["string", "null"] },
-        limit: { type: "integer", minimum: 1, maximum: 200, default: 50 }
-      },
-      additionalProperties: false
-    }
-  },
-  {
-    name: "get_coding_agent_job",
-    description: "Get an Agent Router job by id.",
-    inputSchema: {
-      type: "object",
-      required: ["jobId"],
-      properties: {
-        jobId: { type: "string" }
-      },
-      additionalProperties: false
-    }
-  },
-  {
-    name: "tail_coding_agent_job_events",
-    description: "Return newly recorded Agent Router job events from the JSONL event log for polling-style progress updates.",
-    inputSchema: {
-      type: "object",
-      required: ["jobId"],
-      properties: {
-        jobId: { type: "string" },
-        afterEventIndex: { type: "integer", minimum: 0 },
-        limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
-        includeLogTail: { type: "boolean", default: false },
-        logTailBytes: { type: "integer", minimum: 1, maximum: 65536, default: 8192 }
-      },
-      additionalProperties: false
-    }
-  },
-  {
-    name: "cancel_coding_agent_job",
-    description: "Cancel an Agent Router job and terminate an active child process when the current MCP server owns it.",
-    inputSchema: {
-      type: "object",
-      required: ["jobId"],
-      properties: {
-        jobId: { type: "string" },
-        reason: { type: "string" }
-      },
-      additionalProperties: false
-    }
-  },
-  {
-    name: "list_coding_agent_sessions",
-    description: "List Agent Router sessions from the local registry.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        agent: { type: ["string", "null"] },
-        worktree: { type: ["string", "null"] },
-        includeArchived: { type: "boolean", default: false },
-        limit: { type: "integer", minimum: 1, maximum: 200, default: 50 }
-      },
-      additionalProperties: false
-    }
-  },
-  {
-    name: "continue_coding_agent_session",
-    description: "Create a new tracked job attached to an existing Agent Router session.",
-    inputSchema: {
-      type: "object",
-      required: ["agent", "sessionId", "prompt", "worktree"],
-      properties: {
-        agent: { type: "string" },
-        sessionId: { type: "string" },
-        prompt: { type: "string" },
-        worktree: { type: "string" },
-        async: { type: "boolean", default: true },
-        launchExternalAgents: { type: "boolean", default: true },
-        inheritEnvironment: { type: "boolean", default: true },
-        timeoutSec: { type: "integer", minimum: 1, default: 3600 }
-      },
-      additionalProperties: false
-    }
-  },
-  {
-    name: "archive_coding_agent_session",
-    description: "Mark an Agent Router session as archived in the local registry.",
-    inputSchema: {
-      type: "object",
-      required: ["sessionId"],
-      properties: {
-        sessionId: { type: "string" }
-      },
-      additionalProperties: false
-    }
-  }
-];
+const MAX_RECURSION_DEPTH = 3;
 
 const BUILT_IN_AGENTS = [
   {
@@ -269,121 +101,6 @@ const BUILT_IN_AGENTS = [
   }
 ];
 
-const FRAME_CONTENT_LENGTH = "content-length";
-const FRAME_JSONL = "jsonl";
-let buffer = "";
-let fallbackResponseFraming = FRAME_CONTENT_LENGTH;
-
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-  buffer += chunk;
-  drainBuffer().catch((error) => {
-    writeMessage({
-      jsonrpc: "2.0",
-      id: null,
-      error: { code: -32603, message: error.message }
-    }, fallbackResponseFraming);
-  });
-});
-
-async function drainBuffer() {
-  while (true) {
-    const blankPrefix = /^[\r\n]+/.exec(buffer);
-    if (blankPrefix) {
-      buffer = buffer.slice(blankPrefix[0].length);
-      continue;
-    }
-
-    let raw = null;
-    let framing = FRAME_CONTENT_LENGTH;
-    if (/^Content-Length:/i.test(buffer)) {
-      const headerEnd = buffer.indexOf("\r\n\r\n");
-      if (headerEnd === -1) return;
-      const header = buffer.slice(0, headerEnd);
-      const match = /^Content-Length:\s*(\d+)$/im.exec(header);
-      if (!match) {
-        buffer = "";
-        throw new Error("Missing Content-Length header");
-      }
-      const length = Number(match[1]);
-      const bodyStart = headerEnd + 4;
-      const bodyEnd = bodyStart + length;
-      if (buffer.length < bodyEnd) return;
-      raw = buffer.slice(bodyStart, bodyEnd);
-      buffer = buffer.slice(bodyEnd);
-      framing = FRAME_CONTENT_LENGTH;
-    } else {
-      const lineEnd = buffer.indexOf("\n");
-      if (lineEnd === -1) {
-        if ("content-length:".startsWith(buffer.toLowerCase())) return;
-        return;
-      }
-      raw = buffer.slice(0, lineEnd).replace(/\r$/, "");
-      buffer = buffer.slice(lineEnd + 1);
-      if (!raw.trim()) continue;
-      framing = FRAME_JSONL;
-    }
-
-    fallbackResponseFraming = framing;
-    await handleMessage(JSON.parse(raw), framing);
-  }
-}
-
-async function handleMessage(message, framing = FRAME_CONTENT_LENGTH) {
-  if (!message || typeof message !== "object") return;
-  const { id, method, params } = message;
-
-  if (id === undefined) return;
-
-  try {
-    if (method === "initialize") {
-      return writeResult(id, {
-        protocolVersion: "2024-11-05",
-        capabilities: { tools: {} },
-        serverInfo: { name: SERVER_NAME, version: SERVER_VERSION }
-      }, framing);
-    }
-    if (method === "ping") return writeResult(id, {}, framing);
-    if (method === "tools/list") return writeResult(id, { tools: TOOL_DEFINITIONS }, framing);
-    if (method === "tools/call") {
-      const result = await callTool(params?.name, params?.arguments ?? {});
-      return writeResult(id, asToolResult(result), framing);
-    }
-    writeError(id, -32601, `Unsupported method: ${method}`, framing);
-  } catch (error) {
-    writeResult(id, asToolResult({ error: error.message }, true), framing);
-  }
-}
-
-async function callTool(name, args) {
-  switch (name) {
-    case "discover_coding_agents":
-      return discoverAgents(args);
-    case "get_coding_agent_dispatcher_config":
-      return { config: await readConfig() };
-    case "configure_coding_agent_dispatcher":
-      return configureDispatcher(args);
-    case "run_coding_agent":
-      return createJob(args);
-    case "list_coding_agent_jobs":
-      return listJobs(args);
-    case "get_coding_agent_job":
-      return getJob(args);
-    case "tail_coding_agent_job_events":
-      return tailJobEvents(args);
-    case "cancel_coding_agent_job":
-      return cancelJob(args);
-    case "list_coding_agent_sessions":
-      return listSessions(args);
-    case "continue_coding_agent_session":
-      return continueSession(args);
-    case "archive_coding_agent_session":
-      return archiveSession(args);
-    default:
-      throw new Error(`Unknown tool: ${name}`);
-  }
-}
-
 async function discoverAgents(args) {
   const config = await readConfig();
   const pathEntries = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
@@ -452,6 +169,15 @@ async function configureDispatcher(args) {
 }
 
 async function createJob(args) {
+  const recursionDepth = Number.parseInt(process.env.AGENT_ROUTER_DEPTH ?? "0", 10) || 0;
+  if (recursionDepth >= MAX_RECURSION_DEPTH) {
+    return {
+      status: "failed",
+      error: "recursion_limit",
+      message: `Agent Router recursion limit reached (depth=${recursionDepth}). This prevents infinite agent dispatch loops.`
+    };
+  }
+
   const worktreeCheck = await validateWorktree(args.worktree);
   if (!worktreeCheck.ok) {
     return {
@@ -569,6 +295,7 @@ async function createJob(args) {
     endedAt: initialStatus === "running" ? null : now,
     timeoutSec: args.timeoutSec ?? 3600,
     metadata: isPlainObject(args.metadata) ? args.metadata : {},
+    recursionDepth,
     resultSummary: initialSummary,
     changedFiles: [],
     validation: [],
@@ -2511,10 +2238,15 @@ class AcpStdioClient {
   }
 
   async start() {
+    const currentDepth = Number.parseInt(process.env.AGENT_ROUTER_DEPTH ?? "0", 10) || 0;
+    const childEnv = {
+      ...this.env,
+      AGENT_ROUTER_DEPTH: String(currentDepth + 1)
+    };
     this.child = spawn(this.command, this.args, {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: this.env
+      env: childEnv
     });
     this.child.stdout.setEncoding("utf8");
     this.child.stderr.setEncoding("utf8");
@@ -3089,31 +2821,191 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function asToolResult(payload, isError = false) {
-  return {
-    isError,
-    content: [
-      {
-        type: "text",
-        text: JSON.stringify(payload, null, 2)
+function toToolResult(obj) {
+  return { content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] };
+}
+
+async function startMcpServer() {
+  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+
+  server.tool(
+    "discover_agents",
+    "Discover locally installed coding agents and their ACP adapter status. Returns transport, ACP availability, registry metadata, and install hints.",
+    {
+      refresh: z.boolean().optional().describe("Force refresh the ACP registry cache"),
+      includeNotInstalled: z.boolean().optional().describe("Include agents that are not currently installed")
+    },
+    async (args) => toToolResult(await discoverAgents({
+      refresh: args.refresh === true,
+      includeNotInstalled: args.includeNotInstalled !== false
+    }))
+  );
+
+  server.tool(
+    "manage_config",
+    "Get or set Agent Router configuration including default agent, per-mode defaults, disabled agents, and safety policy.",
+    {
+      action: z.enum(["get", "set"]).describe("Get or set config"),
+      defaultAgent: z.string().nullable().optional().describe("Default agent id to use when none is explicitly requested"),
+      disabledAgents: z.array(z.string()).optional().describe("Agent ids to exclude from automatic selection"),
+      allowCurrentDirectory: z.boolean().optional().describe("Allow dispatching agents in the current working directory"),
+      registryEnabled: z.boolean().optional().describe("Enable ACP registry lookups for agent discovery"),
+      registryUrl: z.string().optional().describe("ACP registry URL override"),
+      registryCacheTtlSec: z.number().optional().describe("ACP registry cache TTL in seconds"),
+      launchExternalAgents: z.boolean().optional().describe("Allow launching external agent processes"),
+      allowBypassPermissions: z.boolean().optional().describe("Allow bypass_permissions permission profile"),
+      inheritEnvironment: z.boolean().optional().describe("Inherit parent process environment for child agents"),
+      modeDefaults: z.record(z.string(), z.unknown()).optional().describe("Per-mode default agent id mapping")
+    },
+    async (args) => {
+      if (args.action === "get") {
+        return toToolResult({ config: await readConfig() });
       }
-    ]
+      return toToolResult(await configureDispatcher(args));
+    }
+  );
+
+  server.tool(
+    "run_agent",
+    "Run a coding agent in an isolated worktree. Requires an absolute worktree path. Supports sync and async execution. ACP-only — CLI fallback is not supported.",
+    {
+      agent: z.string().nullable().optional().describe("Agent id to run; omit for automatic selection"),
+      worktree: z.string().describe("Absolute path to the worktree directory"),
+      prompt: z.string().describe("Task prompt to send to the agent"),
+      mode: z.string().optional().describe("Execution mode (e.g. implementation, planning)"),
+      async: z.boolean().optional().describe("Return immediately and run the job in the background"),
+      sessionId: z.string().nullable().optional().describe("Existing session id to continue"),
+      timeoutSec: z.number().optional().describe("Job timeout in seconds"),
+      permissionProfile: z.enum(["plan", "workspace_write", "accept_edits", "bypass_permissions"]).optional().describe("Permission profile for the agent"),
+      collectDiff: z.boolean().optional().describe("Collect git diff before and after the run"),
+      launchExternalAgents: z.boolean().optional().describe("Override config for launching external agents"),
+      inheritEnvironment: z.boolean().optional().describe("Override config for inheriting parent environment"),
+      metadata: z.record(z.string(), z.unknown()).optional().describe("Arbitrary metadata to attach to the job")
+    },
+    async (args) => toToolResult(await createJob(args))
+  );
+
+  server.tool(
+    "list_jobs",
+    "List Agent Router jobs from the local registry with optional filters.",
+    {
+      status: z.string().nullable().optional().describe("Filter by job status"),
+      agent: z.string().nullable().optional().describe("Filter by agent id"),
+      worktree: z.string().nullable().optional().describe("Filter by worktree path"),
+      limit: z.number().optional().describe("Maximum number of jobs to return")
+    },
+    async (args) => toToolResult(await listJobs(args))
+  );
+
+  server.tool(
+    "get_job",
+    "Get an Agent Router job by id.",
+    {
+      jobId: z.string().describe("Job id to look up")
+    },
+    async (args) => toToolResult(await getJob(args))
+  );
+
+  server.tool(
+    "tail_job_events",
+    "Return newly recorded Agent Router job events from the JSONL event log for polling-style progress updates.",
+    {
+      jobId: z.string().describe("Job id to tail events for"),
+      afterEventIndex: z.number().optional().describe("Return events after this index"),
+      limit: z.number().optional().describe("Maximum number of events to return"),
+      includeLogTail: z.boolean().optional().describe("Include a tail of the raw log file"),
+      logTailBytes: z.number().optional().describe("Number of bytes to include in the log tail")
+    },
+    async (args) => toToolResult(await tailJobEvents(args))
+  );
+
+  server.tool(
+    "cancel_job",
+    "Cancel an Agent Router job and terminate an active child process when the current MCP server owns it.",
+    {
+      jobId: z.string().describe("Job id to cancel"),
+      reason: z.string().optional().describe("Reason for cancellation")
+    },
+    async (args) => toToolResult(await cancelJob(args))
+  );
+
+  server.tool(
+    "manage_sessions",
+    "List, continue, or archive Agent Router sessions. Use action='list' to enumerate sessions, action='continue' to resume a session with a new prompt, or action='archive' to mark a session as archived.",
+    {
+      action: z.enum(["list", "continue", "archive"]).describe("Session action to perform"),
+      includeArchived: z.boolean().optional().describe("Include archived sessions in list results"),
+      agent: z.string().optional().describe("Filter by agent id (list) or specify agent for continue"),
+      worktree: z.string().optional().describe("Filter by worktree path (list) or specify worktree for continue"),
+      limit: z.number().optional().describe("Maximum number of sessions to return (list)"),
+      sessionId: z.string().optional().describe("Session id to continue or archive"),
+      prompt: z.string().optional().describe("Prompt to send when continuing a session"),
+      async: z.boolean().optional().describe("Return immediately and run the job in the background (continue)"),
+      launchExternalAgents: z.boolean().optional().describe("Override config for launching external agents (continue)"),
+      inheritEnvironment: z.boolean().optional().describe("Override config for inheriting parent environment (continue)"),
+      timeoutSec: z.number().optional().describe("Job timeout in seconds (continue)")
+    },
+    async (args) => {
+      if (args.action === "list") {
+        return toToolResult(await listSessions({
+          includeArchived: args.includeArchived,
+          agent: args.agent,
+          worktree: args.worktree,
+          limit: args.limit
+        }));
+      }
+      if (args.action === "continue") {
+        if (!args.sessionId) {
+          return toToolResult({
+            sessionId: null,
+            status: "failed",
+            error: "missing_session_id",
+            message: "sessionId is required when action is 'continue'."
+          });
+        }
+        return toToolResult(await continueSession({
+          agent: args.agent,
+          sessionId: args.sessionId,
+          prompt: args.prompt,
+          worktree: args.worktree,
+          async: args.async,
+          launchExternalAgents: args.launchExternalAgents,
+          inheritEnvironment: args.inheritEnvironment,
+          timeoutSec: args.timeoutSec
+        }));
+      }
+      if (args.action === "archive") {
+        if (!args.sessionId) {
+          return toToolResult({
+            sessionId: null,
+            status: "failed",
+            error: "missing_session_id",
+            message: "sessionId is required when action is 'archive'."
+          });
+        }
+        return toToolResult(await archiveSession({ sessionId: args.sessionId }));
+      }
+      return toToolResult({
+        status: "failed",
+        error: "invalid_action",
+        message: `Unknown session action: ${args.action}`
+      });
+    }
+  );
+
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+
+  const shutdown = async () => {
+    try {
+      await server.close();
+    } catch {
+      // Ignore errors during shutdown
+    }
+    process.exit(0);
   };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
-function writeResult(id, result, framing = FRAME_CONTENT_LENGTH) {
-  writeMessage({ jsonrpc: "2.0", id, result }, framing);
-}
-
-function writeError(id, code, message, framing = FRAME_CONTENT_LENGTH) {
-  writeMessage({ jsonrpc: "2.0", id, error: { code, message } }, framing);
-}
-
-function writeMessage(message, framing = FRAME_CONTENT_LENGTH) {
-  const body = JSON.stringify(message);
-  if (framing === FRAME_JSONL) {
-    process.stdout.write(`${body}\n`);
-    return;
-  }
-  process.stdout.write(`Content-Length: ${Buffer.byteLength(body, "utf8")}\r\n\r\n${body}`);
-}
+export { startMcpServer };

@@ -30,7 +30,7 @@ class McpClient {
   }
 
   async start() {
-    this.child = spawn(process.execPath, ["./mcp/server.mjs"], {
+    this.child = spawn(process.execPath, ["./bin/agent-router.mjs"], {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: this.env
@@ -72,28 +72,23 @@ class McpClient {
   }
 
   write(payload) {
-    const body = JSON.stringify(payload);
-    this.child.stdin.write(`Content-Length: ${Buffer.byteLength(body, "utf8")}\r\n\r\n${body}`);
+    this.child.stdin.write(`${JSON.stringify(payload)}\n`);
   }
 
   handleStdout(chunk) {
     this.stdoutBuffer += chunk;
     while (true) {
-      const headerEnd = this.stdoutBuffer.indexOf("\r\n\r\n");
-      if (headerEnd === -1) return;
-      const header = this.stdoutBuffer.slice(0, headerEnd);
-      const match = /^Content-Length:\s*(\d+)$/im.exec(header);
-      if (!match) {
-        this.rejectAll(new Error(`Malformed MCP response header: ${header}`));
+      const newlineIndex = this.stdoutBuffer.indexOf("\n");
+      if (newlineIndex === -1) return;
+      const line = this.stdoutBuffer.slice(0, newlineIndex).replace(/\r$/, "").trim();
+      this.stdoutBuffer = this.stdoutBuffer.slice(newlineIndex + 1);
+      if (!line) continue;
+      try {
+        this.handleMessage(JSON.parse(line));
+      } catch (error) {
+        this.rejectAll(new Error(`Malformed MCP response line: ${line}`));
         return;
       }
-      const length = Number(match[1]);
-      const bodyStart = headerEnd + 4;
-      const bodyEnd = bodyStart + length;
-      if (this.stdoutBuffer.length < bodyEnd) return;
-      const raw = this.stdoutBuffer.slice(bodyStart, bodyEnd);
-      this.stdoutBuffer = this.stdoutBuffer.slice(bodyEnd);
-      this.handleMessage(JSON.parse(raw));
     }
   }
 
@@ -164,7 +159,8 @@ try {
     capabilities: {},
     clientInfo: { name: "session-lifecycle-smoke", version: "0.0.0" }
   });
-  const config = await client.callTool("configure_coding_agent_dispatcher", {
+  const config = await client.callTool("manage_config", {
+    action: "set",
     launchExternalAgents: true
   });
   assert(
@@ -173,9 +169,9 @@ try {
     config
   );
 
-  const discovery = await client.callTool("discover_coding_agents", {
+  const discovery = await client.callTool("discover_agents", {
     includeNotInstalled: false
-  });
+  }, 15_000);
   const discoveredOpenCode = discovery.agents?.find((agent) => agent.id === "opencode");
   assert(
     discoveredOpenCode?.status === "available" && discoveredOpenCode.version === "fake-opencode 9999.0.0",
@@ -184,7 +180,7 @@ try {
   );
 
   const initialPrompt = "Lifecycle smoke initial prompt.";
-  const firstRun = await client.callTool("run_coding_agent", {
+  const firstRun = await client.callTool("run_agent", {
     agent: "opencode",
     worktree: tempWorktree,
     prompt: initialPrompt,
@@ -224,12 +220,13 @@ try {
         && agent.supported === true
         && agent.sessionCount === 2
       )),
-    "Expected list_coding_agent_sessions to aggregate fake native ACP sessions.",
+    "Expected manage_sessions (list) to aggregate fake native ACP sessions.",
     firstList
   );
 
   const followupPrompt = "Lifecycle smoke follow-up prompt.";
-  const continuedRun = await client.callTool("continue_coding_agent_session", {
+  const continuedRun = await client.callTool("manage_sessions", {
+    action: "continue",
     agent: "opencode",
     sessionId: firstRun.sessionId,
     prompt: followupPrompt,
@@ -240,12 +237,12 @@ try {
   assertCompletedOpenCodeRun(continuedRun, "continued run");
   assert(
     continuedRun.sessionId === firstRun.sessionId,
-    "Expected continue_coding_agent_session to return the same Agent Router sessionId.",
+    "Expected manage_sessions (continue) to return the same Agent Router sessionId.",
     { firstRun, continuedRun }
   );
   assert(
     continuedRun.jobId && continuedRun.jobId !== firstRun.jobId,
-    "Expected continue_coding_agent_session to create a new job.",
+    "Expected manage_sessions (continue) to create a new job.",
     { firstRun, continuedRun }
   );
 
@@ -264,7 +261,8 @@ try {
   });
 
   const nativeFollowupPrompt = "Lifecycle smoke native-only follow-up prompt.";
-  const nativeContinuedRun = await client.callTool("continue_coding_agent_session", {
+  const nativeContinuedRun = await client.callTool("manage_sessions", {
+    action: "continue",
     agent: "opencode",
     sessionId: nativeOnlySession.sessionId,
     prompt: nativeFollowupPrompt,
@@ -293,16 +291,18 @@ try {
     context: "materialized native session list"
   });
 
-  const archiveResult = await client.callTool("archive_coding_agent_session", {
+  const archiveResult = await client.callTool("manage_sessions", {
+    action: "archive",
     sessionId: firstRun.sessionId
   });
   assert(
     archiveResult.sessionId === firstRun.sessionId && archiveResult.status === "archived",
-    "Expected archive_coding_agent_session to mark the session archived.",
+    "Expected manage_sessions (archive) to mark the session archived.",
     archiveResult
   );
 
-  const defaultListAfterArchive = await client.callTool("list_coding_agent_sessions", {
+  const defaultListAfterArchive = await client.callTool("manage_sessions", {
+    action: "list",
     worktree: tempWorktree,
     agent: "opencode",
     limit: 10
@@ -318,7 +318,8 @@ try {
     defaultListAfterArchive
   );
 
-  const archivedList = await client.callTool("list_coding_agent_sessions", {
+  const archivedList = await client.callTool("manage_sessions", {
+    action: "list",
     worktree: tempWorktree,
     agent: "opencode",
     includeArchived: true,
@@ -559,7 +560,8 @@ function write(message) {
 }
 
 async function listSessions(client, args) {
-  return client.callTool("list_coding_agent_sessions", {
+  return client.callTool("manage_sessions", {
+    action: "list",
     ...args,
     limit: 10
   });

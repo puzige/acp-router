@@ -44,10 +44,11 @@ async function main() {
       capabilities: {},
       clientInfo: { name: "dispatcher-session-lifecycle-e2e", version: "0.0.0" }
     });
-    const configResult = await client.callTool("configure_coding_agent_dispatcher", {
+    const configResult = await client.callTool("manage_config", {
+      action: "set",
       launchExternalAgents: true
     });
-    const discovery = await client.callTool("discover_coding_agents", {
+    const discovery = await client.callTool("discover_agents", {
       includeNotInstalled: false
     });
     const discoveredOpenCode = discovery.agents?.find((agent) => agent.id === "opencode");
@@ -57,7 +58,7 @@ async function main() {
       discovery
     );
 
-    const firstStart = await client.callTool("run_coding_agent", {
+    const firstStart = await client.callTool("run_agent", {
       agent: "opencode",
       worktree,
       prompt: buildPrompt(firstLine),
@@ -92,7 +93,8 @@ async function main() {
       context: "after initial run"
     });
 
-    const continuedStart = await client.callTool("continue_coding_agent_session", {
+    const continuedStart = await client.callTool("manage_sessions", {
+      action: "continue",
       agent: "opencode",
       sessionId: firstStart.sessionId,
       prompt: buildPrompt(secondLine),
@@ -102,12 +104,12 @@ async function main() {
     });
     assert(
       continuedStart.sessionId === firstStart.sessionId,
-      "continue_coding_agent_session should reuse the Agent Router session id.",
+      "manage_sessions (continue) should reuse the Agent Router session id.",
       { firstStart, continuedStart }
     );
     assert(
       continuedStart.jobId && continuedStart.jobId !== firstJob.jobId,
-      "continue_coding_agent_session should create a new job.",
+      "manage_sessions (continue) should create a new job.",
       { firstStart, continuedStart }
     );
 
@@ -138,16 +140,18 @@ async function main() {
       context: "after continued run"
     });
 
-    const archiveResult = await client.callTool("archive_coding_agent_session", {
+    const archiveResult = await client.callTool("manage_sessions", {
+      action: "archive",
       sessionId: firstStart.sessionId
     });
     assert(
       archiveResult.sessionId === firstStart.sessionId && archiveResult.status === "archived",
-      "archive_coding_agent_session should archive the Agent Router session.",
+      "manage_sessions (archive) should archive the Agent Router session.",
       archiveResult
     );
 
-    const defaultListAfterArchive = await client.callTool("list_coding_agent_sessions", {
+    const defaultListAfterArchive = await client.callTool("manage_sessions", {
+      action: "list",
       agent: "opencode",
       worktree,
       limit: 20
@@ -175,7 +179,8 @@ async function main() {
     assert(note.includes(secondLine), "note.txt should include the continued E2E line.", { note, secondLine });
     const gitStatus = await git(worktree, ["status", "--porcelain=v1"]);
 
-    await client.callTool("configure_coding_agent_dispatcher", {
+    await client.callTool("manage_config", {
+      action: "set",
       launchExternalAgents: false
     });
 
@@ -351,7 +356,8 @@ async function readJobFromRegistry(dispatcherDataDir, jobId) {
 }
 
 async function findSession(client, { sessionId, worktree, includeArchived }) {
-  const result = await client.callTool("list_coding_agent_sessions", {
+  const result = await client.callTool("manage_sessions", {
+    action: "list",
     agent: "opencode",
     worktree,
     includeArchived,
@@ -446,7 +452,7 @@ class McpClient {
   }
 
   async start() {
-    this.child = spawn(process.execPath, ["./mcp/server.mjs"], {
+    this.child = spawn(process.execPath, ["./bin/agent-router.mjs"], {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: this.env
@@ -487,28 +493,23 @@ class McpClient {
   }
 
   write(payload) {
-    const body = JSON.stringify(payload);
-    this.child.stdin.write(`Content-Length: ${Buffer.byteLength(body, "utf8")}\r\n\r\n${body}`);
+    this.child.stdin.write(`${JSON.stringify(payload)}\n`);
   }
 
   handleStdout(chunk) {
     this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
     while (true) {
-      const headerEnd = this.stdoutBuffer.indexOf("\r\n\r\n");
-      if (headerEnd === -1) return;
-      const header = this.stdoutBuffer.subarray(0, headerEnd).toString("utf8");
-      const match = /^Content-Length:\s*(\d+)$/im.exec(header);
-      if (!match) {
-        this.rejectAll(new Error(`Malformed MCP response header: ${header}`));
+      const newlineIndex = this.stdoutBuffer.indexOf("\n");
+      if (newlineIndex === -1) return;
+      const line = this.stdoutBuffer.subarray(0, newlineIndex).toString("utf8").replace(/\r$/, "").trim();
+      this.stdoutBuffer = this.stdoutBuffer.subarray(newlineIndex + 1);
+      if (!line) continue;
+      try {
+        this.handleMessage(JSON.parse(line));
+      } catch (error) {
+        this.rejectAll(new Error(`Malformed MCP response line: ${line}`));
         return;
       }
-      const length = Number(match[1]);
-      const bodyStart = headerEnd + 4;
-      const bodyEnd = bodyStart + length;
-      if (this.stdoutBuffer.length < bodyEnd) return;
-      const raw = this.stdoutBuffer.subarray(bodyStart, bodyEnd).toString("utf8");
-      this.stdoutBuffer = this.stdoutBuffer.subarray(bodyEnd);
-      this.handleMessage(JSON.parse(raw));
     }
   }
 

@@ -66,7 +66,7 @@ try {
 
   if (
     result.stderr
-    || result.serverVersion !== "0.6.8"
+    || result.serverVersion !== "0.7.0"
     || result.discoveryCount < 1
     || result.registryStatus !== "fetched"
     || result.codexRegistryId !== "codex-acp"
@@ -393,8 +393,8 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 20,
     method: "tools/call",
     params: {
-      name: "get_coding_agent_dispatcher_config",
-      arguments: {}
+      name: "manage_config",
+      arguments: { action: "get" }
     }
   });
   await waitForMessage(() => parseMessages(first.stdout).find((message) => message.id === 20), 3000);
@@ -403,8 +403,9 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 2,
     method: "tools/call",
     params: {
-      name: "configure_coding_agent_dispatcher",
+      name: "manage_config",
       arguments: {
+        action: "set",
         launchExternalAgents: false,
         registryUrl: registryPath,
         registryCacheTtlSec: 0
@@ -417,7 +418,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 3,
     method: "tools/call",
     params: {
-      name: "discover_coding_agents",
+      name: "discover_agents",
       arguments: { includeNotInstalled: true }
     }
   });
@@ -426,7 +427,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 4,
     method: "tools/call",
     params: {
-      name: "run_coding_agent",
+      name: "run_agent",
       arguments: {
         agent: "opencode",
         worktree,
@@ -445,7 +446,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 41,
     method: "tools/call",
     params: {
-      name: "tail_coding_agent_job_events",
+      name: "tail_job_events",
       arguments: {
         jobId: runResult?.jobId,
         limit: 2,
@@ -460,7 +461,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 42,
     method: "tools/call",
     params: {
-      name: "tail_coding_agent_job_events",
+      name: "tail_job_events",
       arguments: {
         jobId: runResult?.jobId,
         afterEventIndex: 1,
@@ -474,7 +475,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 5,
     method: "tools/call",
     params: {
-      name: "run_coding_agent",
+      name: "run_agent",
       arguments: {
         agent: "opencode",
         worktree,
@@ -492,7 +493,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 6,
     method: "tools/call",
     params: {
-      name: "run_coding_agent",
+      name: "run_agent",
       arguments: {
         agent: "claude",
         worktree,
@@ -509,7 +510,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 7,
     method: "tools/call",
     params: {
-      name: "run_coding_agent",
+      name: "run_agent",
       arguments: {
         agent: "cursor-agent",
         worktree,
@@ -526,7 +527,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 8,
     method: "tools/call",
     params: {
-      name: "run_coding_agent",
+      name: "run_agent",
       arguments: {
         agent: "codex",
         worktree,
@@ -543,7 +544,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 90,
     method: "tools/call",
     params: {
-      name: "run_coding_agent",
+      name: "run_agent",
       arguments: {
         agent: "cursor-agent",
         worktree,
@@ -560,7 +561,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 9,
     method: "tools/call",
     params: {
-      name: "run_coding_agent",
+      name: "run_agent",
       arguments: {
         agent: "opencode",
         worktree,
@@ -579,7 +580,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 10,
     method: "tools/call",
     params: {
-      name: "cancel_coding_agent_job",
+      name: "cancel_job",
       arguments: {
         jobId: asyncStartResult?.jobId,
         reason: "Smoke cancel"
@@ -592,7 +593,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 11,
     method: "tools/call",
     params: {
-      name: "get_coding_agent_job",
+      name: "get_job",
       arguments: {
         jobId: asyncStartResult?.jobId
       }
@@ -605,7 +606,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 12,
     method: "tools/call",
     params: {
-      name: "run_coding_agent",
+      name: "run_agent",
       arguments: {
         agent: "opencode",
         worktree,
@@ -625,7 +626,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 13,
     method: "tools/call",
     params: {
-      name: "get_coding_agent_job",
+      name: "get_job",
       arguments: {
         jobId: orphanStartResult?.jobId
       }
@@ -651,7 +652,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 102,
     method: "tools/call",
     params: {
-      name: "get_coding_agent_job",
+      name: "get_job",
       arguments: {
         jobId: orphanStartResult?.jobId
       }
@@ -666,8 +667,9 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 103,
     method: "tools/call",
     params: {
-      name: "list_coding_agent_sessions",
+      name: "manage_sessions",
       arguments: {
+        action: "list",
         worktree,
         includeArchived: true
       }
@@ -679,7 +681,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
     id: 104,
     method: "tools/call",
     params: {
-      name: "run_coding_agent",
+      name: "run_agent",
       arguments: {
         agent: "opencode",
         worktree,
@@ -813,7 +815,7 @@ async function runNpxFallbackSmoke(home, worktree, npxBin, registryPath) {
   const state = {
     stdout: "",
     stderr: "",
-    child: spawn("node", ["./mcp/server.mjs"], {
+    child: spawn("node", ["./bin/agent-router.mjs"], {
       cwd: repoRoot,
       stdio: ["pipe", "pipe", "pipe"],
       env: {
@@ -847,7 +849,7 @@ async function runNpxFallbackSmoke(home, worktree, npxBin, registryPath) {
     id: 2,
     method: "tools/call",
     params: {
-      name: "discover_coding_agents",
+      name: "discover_agents",
       arguments: { includeNotInstalled: true }
     }
   });
@@ -857,7 +859,7 @@ async function runNpxFallbackSmoke(home, worktree, npxBin, registryPath) {
     id: 3,
     method: "tools/call",
     params: {
-      name: "run_coding_agent",
+      name: "run_agent",
       arguments: {
         agent: "claude",
         worktree,
@@ -904,7 +906,7 @@ function startMcpServer({ home, binDirs, pidFile, spawn }) {
   const state = {
     stdout: "",
     stderr: "",
-    child: spawn("node", ["./mcp/server.mjs"], {
+    child: spawn("node", ["./bin/agent-router.mjs"], {
       cwd: repoRoot,
       stdio: ["pipe", "pipe", "pipe"],
       env: {
@@ -936,8 +938,7 @@ async function waitForMessage(getMessage, timeoutMs) {
 }
 
 function send(child, message) {
-  const body = JSON.stringify(message);
-  child.stdin.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+  child.stdin.write(`${JSON.stringify(message)}\n`);
 }
 
 async function waitForExit(child, timeoutMs) {
@@ -1008,13 +1009,12 @@ function parseToolResult(message) {
 
 function parseMessages(output) {
   return output
-    .split("Content-Length:")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
     .filter(Boolean)
-    .map((part) => {
-      const bodyStart = part.indexOf("\r\n\r\n");
-      if (bodyStart === -1) return null;
+    .map((line) => {
       try {
-        return JSON.parse(part.slice(bodyStart + 4));
+        return JSON.parse(line);
       } catch {
         return null;
       }
