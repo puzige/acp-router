@@ -252,9 +252,8 @@ ACP Router runs agents exclusively through the Agent Client Protocol (ACP). The 
 | OpenCode | Native ACP stdio | `opencode acp --cwd <worktree>` | Built-in ACP, no extra install needed |
 | Claude Code | ACP via `claude-agent-acp` | `claude-agent-acp` or `npx --yes @agentclientprotocol/claude-agent-acp` | ACP adapter preferred; npx fallback when not installed |
 | Codex CLI | ACP via `codex-acp` | `codex-acp` or `npx --yes @zed-industries/codex-acp` | ACP adapter preferred; npx fallback when not installed |
-| Gemini CLI | Native ACP via `--acp` | `gemini --acp` or `npx --yes @google/gemini-cli --acp` | Google's official CLI; npx fallback when not installed |
+| Cursor Agent | Native ACP via `acp` subcommand | `agent acp` | Cursor CLI with native ACP; pre-authenticate with `agent login` |
 | Devin | Native ACP via `acp` subcommand | `devin acp` | Cognition's Devin CLI; binary distribution from registry |
-| Cursor Agent | No ACP adapter | Hard-fail | CLI fallback removed; install a Cursor ACP adapter or use a different agent |
 
 ## Configuration
 

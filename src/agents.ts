@@ -538,8 +538,8 @@ function getAcpAdapterArgs(selectedAgent: EnrichedAgent, worktree: string): stri
   if (selectedAgent.id === "opencode") {
     return ["acp", "--cwd", worktree, "--print-logs", "--log-level", "INFO"];
   }
-  if (selectedAgent.id === "gemini") {
-    return ["--acp"];
+  if (selectedAgent.id === "cursor-agent") {
+    return ["acp"];
   }
   if (selectedAgent.id === "devin") {
     return ["acp"];

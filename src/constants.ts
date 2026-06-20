@@ -60,10 +60,10 @@ const ACP_MODE_MAP: AcpModeMap = {
     acceptEdits: "build",
     bypassPermissions: "build"
   },
-  gemini: {
+  "cursor-agent": {
     plan: "plan",
-    acceptEdits: "acceptEdits",
-    bypassPermissions: "bypassPermissions"
+    acceptEdits: "agentic",
+    bypassPermissions: "agentic"
   },
   devin: {
     plan: "plan",
@@ -97,11 +97,19 @@ const BUILT_IN_AGENTS: BuiltInAgent[] = [
     displayName: "Cursor Agent",
     executable: "agent",
     versionArgs: ["--version"],
-    transport: "cli",
-    command: "agent --print --output-format stream-json --workspace <worktree> --trust <prompt>",
-    capabilities: ["file_edit", "shell", "diff_collection"],
-    source: ["path"],
-    notes: ["CLI fallback target; sessions are dispatcher-managed until an ACP adapter is available."]
+    transport: "acp_stdio",
+    command: "agent acp",
+    acp: {
+      executable: "agent",
+      versionArgs: ["--version"],
+      adapterStatus: "cursor_agent_acp",
+      label: "Cursor Agent ACP",
+      buildArgsKey: "agent",
+      buildArgs: () => ["acp"]
+    },
+    capabilities: ["file_edit", "shell", "permission_modes", "diff_collection"],
+    source: ["path", "registry"],
+    notes: ["Cursor CLI with native ACP support via `agent acp`. Pre-authenticate with `agent login`."]
   },
   {
     id: "claude",
@@ -142,25 +150,6 @@ const BUILT_IN_AGENTS: BuiltInAgent[] = [
     notes: ["ACP adapter preferred when codex-acp is installed. Use cautiously to avoid recursive control loops; require an isolated worktree."]
   },
   {
-    id: "gemini",
-    displayName: "Gemini CLI",
-    executable: "gemini",
-    versionArgs: ["--version"],
-    transport: "acp_stdio",
-    command: "gemini --acp",
-    acp: {
-      executable: "gemini",
-      versionArgs: ["--version"],
-      adapterStatus: "gemini_acp",
-      label: "Gemini CLI ACP",
-      buildArgsKey: "gemini",
-      buildArgs: () => ["--acp"]
-    },
-    capabilities: ["file_edit", "shell", "diff_collection"],
-    source: ["path", "registry"],
-    notes: ["Google's official Gemini CLI with ACP support. Launches via npx @google/gemini-cli --acp when not on PATH."]
-  },
-  {
     id: "devin",
     displayName: "Devin",
     executable: "devin",
@@ -187,11 +176,7 @@ const AGENT_ENV_ALLOWLIST: readonly string[] = [
   "ANTHROPIC_BASE_URL",
   "CLAUDE_CODE_OAUTH_TOKEN",
   "CLAUDE_CONFIG_DIR",
-  "GEMINI_API_KEY",
-  "GOOGLE_API_KEY",
-  "GOOGLE_GENAI_USE_VERTEXAI",
-  "GOOGLE_CLOUD_PROJECT",
-  "GOOGLE_CLOUD_LOCATION",
+  "CURSOR_API_KEY",
   "DEVIN_API_KEY",
   "OPENAI_API_KEY"
 ];

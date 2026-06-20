@@ -638,7 +638,7 @@ function mapRegistryAgentToRouterId(registryId: string): string | null {
     "claude-acp": "claude",
     "codex-acp": "codex",
     opencode: "opencode",
-    gemini: "gemini",
+    cursor: "cursor-agent",
     devin: "devin"
   };
   return mapping[registryId] ?? null;
