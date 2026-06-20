@@ -1,6 +1,6 @@
 {
   "name": "agent-router",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "private": true,
   "type": "module",
   "description": "Local Codex plugin for routing coding tasks to ACP and CLI coding agents.",

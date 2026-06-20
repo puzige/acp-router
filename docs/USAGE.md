@@ -2,6 +2,8 @@
 
 Agent Router is a local Codex plugin that lets Codex discover, run, track, cancel, and continue external coding agents through one routing interface.
 
+In Codex UI, the plugin remains `Agent Router` and the bundled skill appears as `Coding Agent Dispatch`.
+
 Current status: local/personal plugin, not yet published to the public Codex marketplace.
 
 ## What It Supports
@@ -41,7 +43,7 @@ codex plugin add agent-router@codex-agent-router
 Pinned release install:
 
 ```bash
-codex plugin marketplace add peanut996/codex-agent-router@v0.6.1
+codex plugin marketplace add peanut996/codex-agent-router@v0.6.2
 codex plugin add agent-router@codex-agent-router
 ```
 

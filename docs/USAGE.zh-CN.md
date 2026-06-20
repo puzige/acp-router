@@ -2,6 +2,8 @@
 
 Agent Router 是一个本地 Codex 插件，用来让 Codex 通过统一的 routing interface 发现、运行、跟踪、取消和继续外部 Coding Agent。
 
+在 Codex UI 中，插件仍显示为 `Agent Router`，内置 skill 显示为 `Coding Agent Dispatch`。
+
 当前状态：本地/个人插件，尚未发布到公开 Codex marketplace。
 
 ## 当前支持能力
@@ -41,7 +43,7 @@ codex plugin add agent-router@codex-agent-router
 固定当前 release 安装：
 
 ```bash
-codex plugin marketplace add peanut996/codex-agent-router@v0.6.1
+codex plugin marketplace add peanut996/codex-agent-router@v0.6.2
 codex plugin add agent-router@codex-agent-router
 ```
 

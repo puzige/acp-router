@@ -8,7 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const SERVER_NAME = "agent-router";
-const SERVER_VERSION = "0.6.1";
+const SERVER_VERSION = "0.6.2";
 const DATA_DIR = process.env.AGENT_ROUTER_DATA_DIR
   ? path.resolve(process.env.AGENT_ROUTER_DATA_DIR)
   : process.env.AGENT_DISPATCHER_DATA_DIR

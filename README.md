@@ -2,6 +2,8 @@
 
 Codex plugin for discovering local coding agents and recording Agent Router jobs through a bundled MCP server.
 
+The plugin display name remains `Agent Router`; its bundled Codex skill is titled `Coding Agent Dispatch` so Codex UI surfaces can distinguish the plugin from the task-dispatch skill.
+
 ## Current Status
 
 This repository is an alpha implementation. It can:
@@ -51,7 +53,7 @@ codex plugin add agent-router@codex-agent-router
 For a pinned install of the current release:
 
 ```bash
-codex plugin marketplace add peanut996/codex-agent-router@v0.6.1
+codex plugin marketplace add peanut996/codex-agent-router@v0.6.2
 codex plugin add agent-router@codex-agent-router
 ```
 

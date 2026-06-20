@@ -1,9 +1,9 @@
 ---
-name: agent-router
-description: Route independent coding tasks from Codex to local ACP or CLI coding agents through the bundled Agent Router MCP tools.
+name: coding-agent-dispatch
+description: Dispatch independent coding tasks from Codex to local ACP or CLI coding agents through the bundled Agent Router MCP tools.
 ---
 
-# Agent Router
+# Coding Agent Dispatch
 
 Use this skill when the user asks Codex to hand off a clearly scoped coding task to another local coding agent, compare agent options, continue an external agent session, or inspect Agent Router jobs.
 
