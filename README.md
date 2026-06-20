@@ -16,6 +16,7 @@ This repository is an alpha implementation. It can:
 - run Claude Code, Cursor Agent, and Codex CLI through CLI fallback adapters.
 - launch supported adapters synchronously or as background jobs with persisted child process metadata and cancellable in-memory process tracking.
 - recover jobs orphaned by an MCP server restart, best-effort terminate the recorded child PID, and release stale worktree locks.
+- aggregate OpenCode native ACP `session/list` results into `list_coding_agent_sessions` when external launch is enabled.
 - surface ACP session config options and available model choices without setting a model by default.
 - return ACP adapter failures in `failureReason` and `agentErrors`, including provider-side errors such as balance or rate-limit failures.
 
@@ -33,6 +34,7 @@ External agent processes inherit the dispatcher process environment by default, 
 npm run check
 npm run smoke
 npm run smoke:sessions
+npm run smoke:opencode:sessions
 ```
 
 `npm run smoke` uses fake local `opencode`, `claude`, `agent`, and `codex` commands so it can validate the ACP and CLI fallback adapters without model calls.
@@ -44,6 +46,8 @@ To verify that the real OpenCode ACP server can initialize and create a session 
 ```bash
 npm run smoke:opencode
 ```
+
+`npm run smoke:opencode:sessions` verifies real OpenCode ACP `session/list` through the dispatcher without sending a prompt or creating a model turn.
 
 ## Real E2E
 

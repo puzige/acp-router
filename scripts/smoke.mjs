@@ -33,7 +33,7 @@ try {
 
   if (
     result.stderr
-    || result.serverVersion !== "0.5.3"
+    || result.serverVersion !== "0.5.4"
     || result.discoveryCount < 1
     || result.runStatus !== "completed"
     || result.adapterStatus !== "opencode_acp"

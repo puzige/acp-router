@@ -8,7 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const SERVER_NAME = "acp-coding-agent-dispatcher";
-const SERVER_VERSION = "0.5.3";
+const SERVER_VERSION = "0.5.4";
 const DATA_DIR = process.env.AGENT_DISPATCHER_DATA_DIR
   ? path.resolve(process.env.AGENT_DISPATCHER_DATA_DIR)
   : path.join(os.homedir(), ".codex", "agent-dispatcher");
@@ -770,15 +770,23 @@ async function cancelJob(args) {
 
 async function listSessions(args) {
   const registry = await readRegistry();
+  const config = await readConfig();
   const limit = args.limit ?? 50;
-  const sessions = Object.values(registry.sessions)
+  const localSessions = Object.values(registry.sessions)
     .filter((session) => args.includeArchived || session.status !== "archived")
     .filter((session) => !args.agent || session.agentId === args.agent)
     .filter((session) => !args.worktree || session.worktree === args.worktree)
-    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
-    .slice(0, limit)
     .map(compactSessionForList);
-  return { sessions };
+  const nativeResult = await maybeListNativeSessions({ args, config, registry });
+  const sessions = mergeSessionLists({
+    localSessions,
+    nativeSessions: nativeResult.sessions,
+    limit
+  });
+  return {
+    sessions,
+    nativeSessionList: nativeResult.meta
+  };
 }
 
 function compactSessionForList(session) {
@@ -795,19 +803,228 @@ function compactSessionForList(session) {
     source: session.source,
     canContinue: session.canContinue,
     availableModelCount: Array.isArray(session.availableModels) ? session.availableModels.length : 0,
-    configOptionCount: Array.isArray(session.agentConfigOptions) ? session.agentConfigOptions.length : 0
+    configOptionCount: Array.isArray(session.agentConfigOptions) ? session.agentConfigOptions.length : 0,
+    additionalDirectories: Array.isArray(session.additionalDirectories) ? session.additionalDirectories : [],
+    nativeMeta: isPlainObject(session.nativeMeta) ? session.nativeMeta : null
   };
+}
+
+async function maybeListNativeSessions({ args, config, registry }) {
+  if (args.agent && args.agent !== "opencode") {
+    return { sessions: [], meta: { attempted: false, reason: "agent_filter_not_native_acp" } };
+  }
+  if (config.safety.launchExternalAgents !== true) {
+    return { sessions: [], meta: { attempted: false, reason: "launch_external_agents_disabled" } };
+  }
+  if (args.worktree && !path.isAbsolute(args.worktree)) {
+    return { sessions: [], meta: { attempted: false, reason: "worktree_must_be_absolute" } };
+  }
+
+  const availableAgents = await discoverAgents({ includeNotInstalled: false }).then((value) => value.agents);
+  const opencode = availableAgents.find((agent) => agent.id === "opencode" && agent.status === "available");
+  if (!opencode) {
+    return { sessions: [], meta: { attempted: false, reason: "opencode_unavailable" } };
+  }
+
+  try {
+    const result = await listOpenCodeNativeSessions({
+      selectedAgent: opencode,
+      worktree: args.worktree ?? null,
+      env: safeEnv({ inheritEnvironment: config.safety.inheritEnvironment === true })
+    });
+    return {
+      sessions: mapNativeSessions({
+        nativeSessions: result.sessions,
+        registry,
+        args,
+        agentId: opencode.id
+      }),
+      meta: {
+        attempted: true,
+        agentId: opencode.id,
+        supported: result.supported,
+        sessionCount: result.sessions.length,
+        pages: result.pages,
+        nextCursor: result.nextCursor ?? null
+      }
+    };
+  } catch (error) {
+    return {
+      sessions: [],
+      meta: {
+        attempted: true,
+        agentId: "opencode",
+        supported: null,
+        error: error.message
+      }
+    };
+  }
+}
+
+async function listOpenCodeNativeSessions({ selectedAgent, worktree, env }) {
+  const cwd = worktree ?? process.cwd();
+  const client = new AcpStdioClient({
+    command: selectedAgent.installedPath ?? selectedAgent.executable ?? "opencode",
+    args: ["acp", "--cwd", cwd, "--print-logs", "--log-level", "ERROR"],
+    cwd,
+    timeoutMs: COMMAND_TIMEOUT_MS,
+    env,
+    onEvent: () => {}
+  });
+  try {
+    await client.start();
+    const initialize = await client.request("initialize", {
+      protocolVersion: 1,
+      clientCapabilities: {},
+      clientInfo: {
+        name: SERVER_NAME,
+        title: "ACP Coding Agent Dispatcher",
+        version: SERVER_VERSION
+      }
+    });
+    const supported = Boolean(initialize?.agentCapabilities?.sessionCapabilities?.list);
+    if (!supported) return { supported: false, sessions: [], pages: 0, nextCursor: null };
+
+    const sessions = [];
+    let cursor = null;
+    let pages = 0;
+    do {
+      const params = {};
+      if (worktree) params.cwd = worktree;
+      if (cursor) params.cursor = cursor;
+      const page = await client.request("session/list", params);
+      if (Array.isArray(page.sessions)) sessions.push(...page.sessions);
+      cursor = typeof page.nextCursor === "string" && page.nextCursor ? page.nextCursor : null;
+      pages += 1;
+    } while (cursor && pages < 10 && sessions.length < 500);
+    return { supported: true, sessions, pages, nextCursor: cursor };
+  } finally {
+    client.dispose();
+  }
+}
+
+function mapNativeSessions({ nativeSessions, registry, args, agentId }) {
+  const localByProvider = new Map();
+  for (const session of Object.values(registry.sessions)) {
+    if (isPlainObject(session) && session.providerSessionId) {
+      localByProvider.set(session.providerSessionId, session);
+    }
+  }
+
+  const result = [];
+  for (const nativeSession of nativeSessions) {
+    if (!isPlainObject(nativeSession) || typeof nativeSession.sessionId !== "string") continue;
+    const providerSessionId = nativeSession.sessionId;
+    const local = localByProvider.get(providerSessionId);
+    if (local) {
+      if (!args.includeArchived && local.status === "archived") continue;
+      if (args.agent && local.agentId !== args.agent) continue;
+      if (args.worktree && (nativeSession.cwd ?? local.worktree) !== args.worktree) continue;
+      result.push(compactSessionForList({
+        ...local,
+        title: nativeSession.title ?? local.title,
+        worktree: nativeSession.cwd ?? local.worktree,
+        updatedAt: nativeSession.updatedAt ?? local.updatedAt,
+        source: local.source === "agent_native" ? "agent_native" : "dispatcher_registry+agent_native",
+        canContinue: true,
+        additionalDirectories: nativeSession.additionalDirectories,
+        nativeMeta: nativeSession._meta
+      }));
+      continue;
+    }
+    if (args.agent && args.agent !== agentId) continue;
+    if (args.worktree && nativeSession.cwd !== args.worktree) continue;
+    result.push(compactSessionForList({
+      sessionId: createNativeDispatcherSessionId(agentId, providerSessionId),
+      providerSessionId,
+      agentId,
+      title: nativeSession.title ?? `Native ${agentId} session`,
+      status: "idle",
+      worktree: nativeSession.cwd ?? null,
+      createdAt: nativeSession.updatedAt ?? null,
+      updatedAt: nativeSession.updatedAt ?? null,
+      lastJobId: null,
+      source: "agent_native",
+      canContinue: true,
+      additionalDirectories: nativeSession.additionalDirectories,
+      nativeMeta: nativeSession._meta
+    }));
+  }
+  return result;
+}
+
+function mergeSessionLists({ localSessions, nativeSessions, limit }) {
+  const byId = new Map();
+  for (const session of [...localSessions, ...nativeSessions]) {
+    if (!session?.sessionId) continue;
+    byId.set(session.sessionId, { ...(byId.get(session.sessionId) ?? {}), ...session });
+  }
+  return Array.from(byId.values())
+    .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")))
+    .slice(0, limit);
+}
+
+function createNativeDispatcherSessionId(agentId, providerSessionId) {
+  return `sess_native_${agentId}_${encodeBase64Url(providerSessionId)}`;
+}
+
+function parseNativeDispatcherSessionId(sessionId) {
+  const match = /^sess_native_([^_]+)_(.+)$/.exec(String(sessionId ?? ""));
+  if (!match) return null;
+  const providerSessionId = decodeBase64Url(match[2]);
+  if (!providerSessionId) return null;
+  return {
+    agentId: match[1],
+    providerSessionId
+  };
+}
+
+function encodeBase64Url(value) {
+  return Buffer.from(String(value), "utf8")
+    .toString("base64")
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/u, "");
+}
+
+function decodeBase64Url(value) {
+  try {
+    const base64 = String(value).replaceAll("-", "+").replaceAll("_", "/");
+    const padded = `${base64}${"=".repeat((4 - (base64.length % 4)) % 4)}`;
+    return Buffer.from(padded, "base64").toString("utf8");
+  } catch {
+    return null;
+  }
 }
 
 async function continueSession(args) {
   const registry = await readRegistry();
-  const session = registry.sessions[args.sessionId];
+  let session = registry.sessions[args.sessionId];
   if (!session) {
-    return {
+    const nativeRef = parseNativeDispatcherSessionId(args.sessionId);
+    if (!nativeRef || nativeRef.agentId !== args.agent) {
+      return {
+        sessionId: args.sessionId,
+        status: "not_found",
+        message: "The dispatcher can only continue sessions already recorded in the registry or native ACP sessions returned by list_coding_agent_sessions."
+      };
+    }
+    const now = new Date().toISOString();
+    session = {
       sessionId: args.sessionId,
-      status: "not_found",
-      message: "The V1 scaffold can only continue sessions already recorded in the dispatcher registry."
+      providerSessionId: nativeRef.providerSessionId,
+      agentId: args.agent,
+      title: preview(args.prompt, 60),
+      status: "idle",
+      worktree: args.worktree,
+      createdAt: now,
+      updatedAt: now,
+      lastJobId: null,
+      source: "agent_native",
+      canContinue: true
     };
+    registry.sessions[session.sessionId] = session;
+    await writeRegistry(registry);
   }
   return createJob({
     agent: args.agent,

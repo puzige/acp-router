@@ -195,16 +195,33 @@ try {
   }, 10_000);
   assertCompletedOpenCodeRun(firstRun, "initial run");
 
-  const firstSession = await findOnlySession(client, {
+  const firstList = await listSessions(client, {
     worktree: tempWorktree,
     agent: "opencode"
   });
+  const firstSession = findSessionById(firstList, firstRun.sessionId);
   assertSession(firstSession, {
     expectedSessionId: firstRun.sessionId,
     expectedLastJobId: firstRun.jobId,
     expectedStatus: "idle",
+    expectedProviderSessionId: "fake-opencode-session",
+    expectedSource: "dispatcher_registry+agent_native",
     context: "first session list"
   });
+  const nativeOnlySession = firstList.sessions?.find((session) => session.providerSessionId === "fake-native-only-session");
+  assertSession(nativeOnlySession, {
+    expectedSessionId: nativeOnlySession?.sessionId,
+    expectedLastJobId: null,
+    expectedStatus: "idle",
+    expectedProviderSessionId: "fake-native-only-session",
+    expectedSource: "agent_native",
+    context: "native-only session list"
+  });
+  assert(
+    firstList.nativeSessionList?.attempted === true && firstList.nativeSessionList.sessionCount === 2,
+    "Expected list_coding_agent_sessions to aggregate fake native ACP sessions.",
+    firstList
+  );
 
   const followupPrompt = "Lifecycle smoke follow-up prompt.";
   const continuedRun = await client.callTool("continue_coding_agent_session", {
@@ -227,15 +244,48 @@ try {
     { firstRun, continuedRun }
   );
 
-  const continuedSession = await findOnlySession(client, {
+  const continuedList = await listSessions(client, {
     worktree: tempWorktree,
     agent: "opencode"
   });
+  const continuedSession = findSessionById(continuedList, firstRun.sessionId);
   assertSession(continuedSession, {
     expectedSessionId: firstRun.sessionId,
     expectedLastJobId: continuedRun.jobId,
     expectedStatus: "idle",
+    expectedProviderSessionId: "fake-opencode-session",
+    expectedSource: "dispatcher_registry+agent_native",
     context: "continued session list"
+  });
+
+  const nativeFollowupPrompt = "Lifecycle smoke native-only follow-up prompt.";
+  const nativeContinuedRun = await client.callTool("continue_coding_agent_session", {
+    agent: "opencode",
+    sessionId: nativeOnlySession.sessionId,
+    prompt: nativeFollowupPrompt,
+    worktree: tempWorktree,
+    async: false,
+    timeoutSec: 5
+  }, 10_000);
+  assertCompletedOpenCodeRun(nativeContinuedRun, "native-only continued run", "fake-native-only-session");
+  assert(
+    nativeContinuedRun.sessionId === nativeOnlySession.sessionId,
+    "Expected native-only continue to materialize and reuse the native dispatcher sessionId.",
+    { nativeOnlySession, nativeContinuedRun }
+  );
+
+  const nativeBoundList = await listSessions(client, {
+    worktree: tempWorktree,
+    agent: "opencode"
+  });
+  const nativeBoundSession = findSessionById(nativeBoundList, nativeOnlySession.sessionId);
+  assertSession(nativeBoundSession, {
+    expectedSessionId: nativeOnlySession.sessionId,
+    expectedLastJobId: nativeContinuedRun.jobId,
+    expectedStatus: "idle",
+    expectedProviderSessionId: "fake-native-only-session",
+    expectedSource: "agent_native",
+    context: "materialized native session list"
   });
 
   const archiveResult = await client.callTool("archive_coding_agent_session", {
@@ -257,6 +307,11 @@ try {
     "Expected archived session to be hidden from the default session list.",
     defaultListAfterArchive
   );
+  assert(
+    defaultListAfterArchive.sessions?.some((session) => session.sessionId === nativeOnlySession.sessionId),
+    "Expected non-archived native session to remain visible after archiving the dispatcher-created session.",
+    defaultListAfterArchive
+  );
 
   const archivedList = await client.callTool("list_coding_agent_sessions", {
     worktree: tempWorktree,
@@ -269,11 +324,12 @@ try {
     expectedSessionId: firstRun.sessionId,
     expectedLastJobId: continuedRun.jobId,
     expectedStatus: "archived",
+    expectedProviderSessionId: "fake-opencode-session",
     context: "archived session list"
   });
 
   const fakeCalls = await readJsonl(fakeOpenCodeLog);
-  assertFakeOpenCodeCalls(fakeCalls, { initialPrompt, followupPrompt });
+  assertFakeOpenCodeCalls(fakeCalls, { initialPrompt, followupPrompt, nativeFollowupPrompt });
 
   passed = true;
   console.log(JSON.stringify({
@@ -294,10 +350,13 @@ try {
       fakeOpenCodeVersion: discoveredOpenCode.version,
       initialListLastJobId: firstSession.lastJobId,
       continuedListLastJobId: continuedSession.lastJobId,
+      nativeOnlySessionId: nativeOnlySession.sessionId,
+      nativeContinuedJobId: nativeContinuedRun.jobId,
       defaultListAfterArchiveCount: defaultListAfterArchive.sessions?.length ?? 0,
       includeArchivedCount: archivedList.sessions?.length ?? 0,
       fakeSessionNewCalls: fakeCalls.filter((call) => call.method === "session/new").length,
       fakeSessionResumeCalls: fakeCalls.filter((call) => call.method === "session/resume").length,
+      fakeSessionListCalls: fakeCalls.filter((call) => call.method === "session/list").length,
       fakePromptCalls: fakeCalls.filter((call) => call.method === "session/prompt").length
     },
     stderr: client.stderr.trim()
@@ -328,6 +387,7 @@ async function createFakeOpenCode(binDir) {
 const fs = require("node:fs");
 const logPath = process.env.AGENT_DISPATCHER_LIFECYCLE_FAKE_LOG;
 const providerSessionId = "fake-opencode-session";
+const nativeOnlySessionId = "fake-native-only-session";
 
 if (process.argv.includes("--version")) {
   console.log("fake-opencode 9999.0.0");
@@ -395,7 +455,7 @@ function handle(message) {
   }
 
   if (message.method === "session/resume") {
-    if (message.params?.sessionId !== providerSessionId) {
+    if (![providerSessionId, nativeOnlySessionId].includes(message.params?.sessionId)) {
       write({
         jsonrpc: "2.0",
         id: message.id,
@@ -407,7 +467,7 @@ function handle(message) {
       jsonrpc: "2.0",
       id: message.id,
       result: {
-        sessionId: providerSessionId,
+        sessionId: message.params.sessionId,
         configOptions: [
           {
             id: "model",
@@ -422,12 +482,40 @@ function handle(message) {
     return;
   }
 
+  if (message.method === "session/list") {
+    const cwd = message.params?.cwd || process.cwd();
+    write({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: {
+        sessions: [
+          {
+            sessionId: providerSessionId,
+            cwd,
+            title: "Fake OpenCode dispatcher-bound session",
+            updatedAt: "2026-06-20T00:00:02Z",
+            _meta: { messageCount: 2 }
+          },
+          {
+            sessionId: nativeOnlySessionId,
+            cwd,
+            title: "Fake OpenCode native-only session",
+            updatedAt: "2026-06-20T00:00:01Z",
+            _meta: { messageCount: 1 }
+          }
+        ]
+      }
+    });
+    return;
+  }
+
   if (message.method === "session/prompt") {
+    const sessionId = message.params?.sessionId || providerSessionId;
     write({
       jsonrpc: "2.0",
       method: "session/update",
       params: {
-        sessionId: providerSessionId,
+        sessionId,
         update: {
           sessionUpdate: "agent_message_chunk",
           content: { type: "text", text: "Fake OpenCode completed lifecycle prompt." }
@@ -465,28 +553,37 @@ function write(message) {
   await chmod(scriptPath, 0o755);
 }
 
-async function findOnlySession(client, args) {
-  const result = await client.callTool("list_coding_agent_sessions", {
+async function listSessions(client, args) {
+  return client.callTool("list_coding_agent_sessions", {
     ...args,
     limit: 10
   });
-  assert(result.sessions?.length === 1, "Expected exactly one visible dispatcher session.", result);
-  return result.sessions[0];
 }
 
-function assertCompletedOpenCodeRun(result, context) {
+function findSessionById(listResult, sessionId) {
+  return listResult.sessions?.find((session) => session.sessionId === sessionId) ?? null;
+}
+
+function assertCompletedOpenCodeRun(result, context, expectedProviderSessionId = "fake-opencode-session") {
   assert(result.status === "completed", `Expected ${context} to complete.`, result);
   assert(result.adapterStatus === "opencode_acp", `Expected ${context} to use the OpenCode ACP adapter.`, result);
   assert(result.sessionId && result.jobId, `Expected ${context} to include sessionId and jobId.`, result);
   assert(
-    result.providerSessionId === "fake-opencode-session",
+    result.providerSessionId === expectedProviderSessionId,
     `Expected ${context} to bind the fake provider session id.`,
     result
   );
   assert(result.worktree === tempWorktree, `Expected ${context} to report the requested worktree.`, result);
 }
 
-function assertSession(session, { expectedSessionId, expectedLastJobId, expectedStatus, context }) {
+function assertSession(session, {
+  expectedSessionId,
+  expectedLastJobId,
+  expectedStatus,
+  expectedProviderSessionId,
+  expectedSource,
+  context
+}) {
   assert(session, `Expected to find session in ${context}.`, { expectedSessionId, expectedLastJobId });
   assert(session.sessionId === expectedSessionId, `Expected ${context} to return the same sessionId.`, session);
   assert(session.agentId === "opencode", `Expected ${context} to be tied to opencode.`, session);
@@ -495,26 +592,37 @@ function assertSession(session, { expectedSessionId, expectedLastJobId, expected
   assert(session.status === expectedStatus, `Expected ${context} status to be ${expectedStatus}.`, session);
   assert(session.canContinue === true, `Expected ${context} canContinue=true.`, session);
   assert(
-    session.providerSessionId === "fake-opencode-session",
+    session.providerSessionId === expectedProviderSessionId,
     `Expected ${context} providerSessionId to be persisted.`,
     session
   );
+  if (expectedSource) {
+    assert(session.source === expectedSource, `Expected ${context} source to be ${expectedSource}.`, session);
+  }
 }
 
-function assertFakeOpenCodeCalls(calls, { initialPrompt, followupPrompt }) {
+function assertFakeOpenCodeCalls(calls, { initialPrompt, followupPrompt, nativeFollowupPrompt }) {
   const sessionNewCalls = calls.filter((call) => call.method === "session/new");
   const sessionResumeCalls = calls.filter((call) => call.method === "session/resume");
+  const sessionListCalls = calls.filter((call) => call.method === "session/list");
   const promptCalls = calls.filter((call) => call.method === "session/prompt");
   assert(sessionNewCalls.length === 1, "Expected fake OpenCode to create exactly one provider session.", calls);
-  assert(sessionResumeCalls.length === 1, "Expected fake OpenCode to resume exactly one provider session.", calls);
+  assert(sessionResumeCalls.length === 2, "Expected fake OpenCode to resume the dispatcher and native-only provider sessions.", calls);
   assert(
     sessionResumeCalls[0]?.params?.sessionId === "fake-opencode-session",
     "Expected fake OpenCode resume to use the providerSessionId from the first run.",
     sessionResumeCalls
   );
-  assert(promptCalls.length === 2, "Expected fake OpenCode to receive exactly two prompts.", calls);
+  assert(
+    sessionResumeCalls[1]?.params?.sessionId === "fake-native-only-session",
+    "Expected fake OpenCode resume to use the native-only providerSessionId.",
+    sessionResumeCalls
+  );
+  assert(sessionListCalls.length >= 1, "Expected fake OpenCode to receive native session/list requests.", calls);
+  assert(promptCalls.length === 3, "Expected fake OpenCode to receive exactly three prompts.", calls);
   assert(promptCalls[0]?.promptText?.includes(initialPrompt), "Expected initial prompt to reach fake OpenCode.", promptCalls);
   assert(promptCalls[1]?.promptText?.includes(followupPrompt), "Expected follow-up prompt to reach fake OpenCode.", promptCalls);
+  assert(promptCalls[2]?.promptText?.includes(nativeFollowupPrompt), "Expected native follow-up prompt to reach fake OpenCode.", promptCalls);
 }
 
 async function readJsonl(filePath) {

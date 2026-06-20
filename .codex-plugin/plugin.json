@@ -1,6 +1,6 @@
 {
   "name": "acp-coding-agent-dispatcher",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Dispatch independent coding tasks from Codex to local ACP or CLI coding agents.",
   "author": {
     "name": "Local developer"
