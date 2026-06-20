@@ -3,7 +3,7 @@
   "version": "0.6.0",
   "description": "Route independent coding tasks from Codex to local ACP or CLI coding agents.",
   "author": {
-    "name": "Local developer"
+    "name": "peanut996"
   },
   "license": "UNLICENSED",
   "keywords": [
@@ -18,7 +18,7 @@
     "displayName": "Agent Router",
     "shortDescription": "Route isolated coding tasks to local coding agents.",
     "longDescription": "Agent Router helps Codex discover local coding agents, choose a safe worktree, record tracked jobs, inspect local worktree state, and continue or archive external agent sessions through a bundled MCP server. The current alpha can run OpenCode through ACP and Claude Code, Cursor Agent, or Codex through CLI fallback when external launch is explicitly enabled.",
-    "developerName": "Local developer",
+    "developerName": "peanut996",
     "category": "Productivity",
     "capabilities": [
       "MCP",

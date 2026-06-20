@@ -33,6 +33,30 @@ External agent processes inherit the Agent Router process environment by default
 - English: [docs/USAGE.md](docs/USAGE.md)
 - 中文: [docs/USAGE.zh-CN.md](docs/USAGE.zh-CN.md)
 
+## Install From GitHub
+
+Agent Router is distributed as a repo marketplace from:
+
+```text
+https://github.com/peanut996/codex-agent-router
+```
+
+Install the marketplace and then install the plugin:
+
+```bash
+codex plugin marketplace add peanut996/codex-agent-router
+codex plugin add agent-router@codex-agent-router
+```
+
+For a pinned install of the current release:
+
+```bash
+codex plugin marketplace add peanut996/codex-agent-router@v0.6.0
+codex plugin add agent-router@codex-agent-router
+```
+
+Open a new Codex thread after installing so Codex picks up the bundled skill and MCP server.
+
 ## Validate
 
 ```bash

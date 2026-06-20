@@ -31,10 +31,26 @@ External launches are disabled by default. This is intentional.
 
 ## Local Install And Refresh
 
+Public beta install from GitHub:
+
+```bash
+codex plugin marketplace add peanut996/codex-agent-router
+codex plugin add agent-router@codex-agent-router
+```
+
+Pinned release install:
+
+```bash
+codex plugin marketplace add peanut996/codex-agent-router@v0.6.0
+codex plugin add agent-router@codex-agent-router
+```
+
+Open a new Codex thread after installing so Codex picks up the bundled skill and MCP server.
+
 The development source is:
 
 ```bash
-/Users/peanut996/Workspace/acp-coding-agent-dispatcher
+/Users/peanut996/Workspace/codex-agent-router
 ```
 
 The personal plugin source is:
@@ -47,7 +63,7 @@ To refresh the local plugin source from the development repo:
 
 ```bash
 rsync -a --delete --exclude='.git' \
-  /Users/peanut996/Workspace/acp-coding-agent-dispatcher/ \
+  /Users/peanut996/Workspace/codex-agent-router/ \
   /Users/peanut996/plugins/agent-router/
 ```
 

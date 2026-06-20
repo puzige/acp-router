@@ -31,10 +31,26 @@ Codex 仍然是主控。外部 agent 在指定 worktree 中执行任务，Agent 
 
 ## 本地安装和刷新
 
+从 GitHub 公开 beta 安装：
+
+```bash
+codex plugin marketplace add peanut996/codex-agent-router
+codex plugin add agent-router@codex-agent-router
+```
+
+固定当前 release 安装：
+
+```bash
+codex plugin marketplace add peanut996/codex-agent-router@v0.6.0
+codex plugin add agent-router@codex-agent-router
+```
+
+安装后请新开一个 Codex thread，这样 Codex 才会加载新的 skill 和 MCP server。
+
 开发源码路径：
 
 ```bash
-/Users/peanut996/Workspace/acp-coding-agent-dispatcher
+/Users/peanut996/Workspace/codex-agent-router
 ```
 
 个人插件源路径：
@@ -47,7 +63,7 @@ Codex 仍然是主控。外部 agent 在指定 worktree 中执行任务，Agent 
 
 ```bash
 rsync -a --delete --exclude='.git' \
-  /Users/peanut996/Workspace/acp-coding-agent-dispatcher/ \
+  /Users/peanut996/Workspace/codex-agent-router/ \
   /Users/peanut996/plugins/agent-router/
 ```
 
