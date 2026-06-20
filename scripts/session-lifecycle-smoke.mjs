@@ -218,7 +218,12 @@ try {
     context: "native-only session list"
   });
   assert(
-    firstList.nativeSessionList?.attempted === true && firstList.nativeSessionList.sessionCount === 2,
+    firstList.nativeSessionList?.attempted === true
+      && firstList.nativeSessionList.agents?.some((agent) => (
+        agent.agentId === "opencode"
+        && agent.supported === true
+        && agent.sessionCount === 2
+      )),
     "Expected list_coding_agent_sessions to aggregate fake native ACP sessions.",
     firstList
   );

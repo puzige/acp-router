@@ -12,11 +12,13 @@ Current status: public beta distributed through the GitHub marketplace source.
 | --- | --- | --- |
 | OpenCode | Native ACP stdio | Real E2E passed |
 | OpenCode session lifecycle | Native ACP stdio | Real session list, continue, and archive passed |
-| Claude Code | CLI fallback | Real E2E passed |
+| Claude Code | ACP adapter preferred, CLI fallback retained | CLI fallback real E2E passed; ACP adapter path covered by smoke |
 | Cursor Agent | CLI fallback through official `agent` command | Real E2E passed |
-| Codex CLI | CLI fallback | Real E2E passed |
+| Codex CLI | ACP adapter preferred, CLI fallback retained | CLI fallback real E2E passed; ACP adapter path covered by smoke |
 
 Agent Router keeps Codex as the controller. External agents run in a specified worktree and return job status, session ids, changed files, validation notes, failure reasons, agent errors, and log paths.
+
+Discovery also reads ACP Registry metadata by default. Registry data is cached under `~/.codex/agent-router/acp-registry-cache.json` and is used for ids, icons, versions, and install hints only; Agent Router does not auto-install adapters.
 
 ## Requirements
 
@@ -25,6 +27,8 @@ Agent Router keeps Codex as the controller. External agents run in a specified w
 - A git worktree for every write task.
 - At least one installed external agent:
   - `opencode`
+  - `claude-agent-acp` for Claude ACP, or `claude` for CLI fallback
+  - `codex-acp` for Codex ACP, or `codex` for CLI fallback
   - `claude`
   - Cursor Agent `agent`
   - `codex`
@@ -43,7 +47,7 @@ codex plugin add agent-router@codex-agent-router
 Pinned release install:
 
 ```bash
-codex plugin marketplace add peanut996/codex-agent-router@v0.6.6
+codex plugin marketplace add peanut996/codex-agent-router@v0.6.7
 codex plugin add agent-router@codex-agent-router
 ```
 

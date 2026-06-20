@@ -15,6 +15,7 @@ const tempWorktree = path.join(tempRoot, "worktree");
 const tempBin = path.join(tempRoot, "bin");
 const tempOldBin = path.join(tempRoot, "old-bin");
 const tempPidFile = path.join(tempRoot, "children.pid");
+const tempRegistry = path.join(tempRoot, "acp-registry.json");
 
 try {
   await mkdir(tempHome, { recursive: true });
@@ -25,16 +26,32 @@ try {
   await createFakeOpenCode(tempBin);
   await createFakeClaude(tempOldBin, { version: "fake-claude 0.0.1", fail: true });
   await createFakeClaude(tempBin, { version: "fake-claude 999.0.0" });
+  await createFakeAcpAgent(tempBin, {
+    executable: "claude-agent-acp",
+    version: "fake-claude-agent-acp 999.0.0",
+    sessionId: "fake-claude-acp-session",
+    message: "Fake Claude ACP completed."
+  });
   await createFakeCursorAgent(tempBin);
   await createFakeCodex(tempBin);
+  await createFakeAcpAgent(tempBin, {
+    executable: "codex-acp",
+    version: "fake-codex-acp 999.0.0",
+    sessionId: "fake-codex-acp-session",
+    message: "Fake Codex ACP completed."
+  });
+  await writeFile(tempRegistry, JSON.stringify(createFakeRegistry(), null, 2), "utf8");
 
-  const result = await runMcpSmoke(tempHome, tempWorktree, [tempOldBin, tempBin], tempPidFile);
+  const result = await runMcpSmoke(tempHome, tempWorktree, [tempOldBin, tempBin], tempPidFile, tempRegistry);
   console.log(JSON.stringify(result, null, 2));
 
   if (
     result.stderr
-    || result.serverVersion !== "0.6.6"
+    || result.serverVersion !== "0.6.7"
     || result.discoveryCount < 1
+    || result.registryStatus !== "fetched"
+    || result.codexRegistryId !== "codex-acp"
+    || result.claudeRegistryId !== "claude-acp"
     || result.defaultLaunchExternalAgents !== true
     || result.configuredLaunchExternalAgents !== false
     || result.runStatus !== "completed"
@@ -60,16 +77,16 @@ try {
     || !result.agentErrors?.some((error) => error.includes("authentication_failed"))
     || !result.agentErrors?.some((error) => error.includes("Not logged in"))
     || !result.failureAvailableModels?.some((model) => model.value === "opencode-go/glm-5.2")
-    || result.claudeDiscoveredVersion !== "fake-claude 999.0.0"
+    || result.claudeDiscoveredVersion !== "fake-claude-agent-acp 999.0.0"
     || result.claudeStatus !== "completed"
-    || result.claudeAdapterStatus !== "claude_cli"
-    || result.claudeProviderSessionId !== "fake-claude-session"
+    || result.claudeAdapterStatus !== "claude_acp"
+    || result.claudeProviderSessionId !== "fake-claude-acp-session"
     || result.cursorStatus !== "completed"
     || result.cursorAdapterStatus !== "cursor_agent_cli"
     || result.cursorProviderSessionId !== "fake-cursor-session"
     || result.codexStatus !== "completed"
-    || result.codexAdapterStatus !== "codex_cli"
-    || result.codexProviderSessionId !== "fake-codex-session"
+    || result.codexAdapterStatus !== "codex_acp"
+    || result.codexProviderSessionId !== "fake-codex-acp-session"
     || result.recordOnlyStatus !== "completed"
     || result.recordOnlyAdapterStatus !== "record_only"
     || result.recordOnlyLaunchExternalAgents !== false
@@ -89,7 +106,7 @@ try {
     || result.orphanRecoveredProcessKillStatus !== "signal_sent"
     || result.orphanProcessKilled !== true
     || result.restartFollowupStatus !== "completed"
-    || result.restartFollowupAdapterStatus !== "claude_cli"
+    || result.restartFollowupAdapterStatus !== "cursor_agent_cli"
   ) {
     process.exitCode = 1;
   }
@@ -142,6 +159,45 @@ function write(message) {
   await chmod(scriptPath, 0o755);
 }
 
+async function createFakeAcpAgent(binDir, { executable, version, sessionId, message }) {
+  const scriptPath = path.join(binDir, executable);
+  const script = `#!/usr/bin/env node
+if (process.argv.includes("--version")) {
+  console.log(${JSON.stringify(version)});
+  process.exit(0);
+}
+process.stdin.setEncoding("utf8");
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  while (buffer.includes("\\n")) {
+    const index = buffer.indexOf("\\n");
+    const line = buffer.slice(0, index).trim();
+    buffer = buffer.slice(index + 1);
+    if (!line) continue;
+    const request = JSON.parse(line);
+    if (request.method === "initialize") {
+      write({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {}, list: {} } }, agentInfo: { name: ${JSON.stringify(executable)}, version: "0.0.0" }, authMethods: [] } });
+    } else if (request.method === "session/new" || request.method === "session/resume") {
+      write({ jsonrpc: "2.0", id: request.id, result: { sessionId: ${JSON.stringify(sessionId)}, configOptions: [] } });
+    } else if (request.method === "session/list") {
+      write({ jsonrpc: "2.0", id: request.id, result: { sessions: [], nextCursor: null } });
+    } else if (request.method === "session/prompt") {
+      write({ jsonrpc: "2.0", method: "session/update", params: { sessionId: ${JSON.stringify(sessionId)}, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: ${JSON.stringify(message)} } } } });
+      write({ jsonrpc: "2.0", id: request.id, result: { stopReason: "end_turn" } });
+    } else {
+      write({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "Unsupported fake ACP method" } });
+    }
+  }
+});
+function write(response) {
+  process.stdout.write(JSON.stringify(response) + "\\n");
+}
+`;
+  await writeFile(scriptPath, script, "utf8");
+  await chmod(scriptPath, 0o755);
+}
+
 async function createFakeClaude(binDir, { version, fail = false }) {
   const scriptPath = path.join(binDir, "claude");
   const script = `#!/usr/bin/env node
@@ -185,7 +241,14 @@ if (!process.argv.includes("--print")
   console.error("expected Cursor Agent print-mode arguments");
   process.exit(1);
 }
-console.log(JSON.stringify({ type: "message", sessionId: "fake-cursor-session", message: "Fake Cursor Agent completed." }));
+if (process.argv.join(" ").includes("Smoke async cancel") || process.argv.join(" ").includes("Smoke orphan recovery")) {
+  if (process.env.AGENT_DISPATCHER_SMOKE_PID_FILE) {
+    require("node:fs").appendFileSync(process.env.AGENT_DISPATCHER_SMOKE_PID_FILE, String(process.pid) + "\\n");
+  }
+  setInterval(() => {}, 1000);
+} else {
+  console.log(JSON.stringify({ type: "message", sessionId: "fake-cursor-session", message: "Fake Cursor Agent completed." }));
+}
 `;
   await writeFile(scriptPath, script, "utf8");
   await chmod(scriptPath, 0o755);
@@ -204,7 +267,39 @@ console.log(JSON.stringify({ type: "agent_message", session_id: "fake-codex-sess
   await chmod(scriptPath, 0o755);
 }
 
-async function runMcpSmoke(home, worktree, binDirs, pidFile) {
+function createFakeRegistry() {
+  return {
+    version: "1.0.0",
+    agents: [
+      {
+        id: "claude-acp",
+        name: "Claude Agent",
+        version: "0.48.0",
+        description: "ACP wrapper for Anthropic's Claude",
+        repository: "https://github.com/agentclientprotocol/claude-agent-acp",
+        license: "proprietary",
+        distribution: {
+          npx: { package: "@agentclientprotocol/claude-agent-acp@0.48.0" }
+        },
+        icon: "https://cdn.agentclientprotocol.com/registry/v1/latest/claude-acp.svg"
+      },
+      {
+        id: "codex-acp",
+        name: "Codex CLI",
+        version: "0.16.0",
+        description: "ACP adapter for OpenAI's coding assistant",
+        repository: "https://github.com/zed-industries/codex-acp",
+        license: "Apache-2.0",
+        distribution: {
+          npx: { package: "@zed-industries/codex-acp@0.16.0" }
+        }
+      }
+    ],
+    extensions: []
+  };
+}
+
+async function runMcpSmoke(home, worktree, binDirs, pidFile, registryPath) {
   const { spawn } = await import("node:child_process");
   const first = startMcpServer({ home, binDirs, pidFile, spawn });
   const { child } = first;
@@ -236,10 +331,13 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile) {
     params: {
       name: "configure_coding_agent_dispatcher",
       arguments: {
-        launchExternalAgents: false
+        launchExternalAgents: false,
+        registryUrl: registryPath,
+        registryCacheTtlSec: 0
       }
     }
   });
+  await waitForMessage(() => parseMessages(first.stdout).find((message) => message.id === 2), 3000);
   send(child, {
     jsonrpc: "2.0",
     id: 3,
@@ -324,7 +422,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile) {
       arguments: {
         agent: "claude",
         worktree,
-        prompt: "Smoke test Claude CLI",
+        prompt: "Smoke test Claude ACP",
         async: false,
         launchExternalAgents: true,
         permissionProfile: "workspace_write"
@@ -390,7 +488,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile) {
     params: {
       name: "run_coding_agent",
       arguments: {
-        agent: "claude",
+        agent: "cursor-agent",
         worktree,
         prompt: "Smoke async cancel",
         async: true,
@@ -435,7 +533,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile) {
     params: {
       name: "run_coding_agent",
       arguments: {
-        agent: "claude",
+        agent: "cursor-agent",
         worktree,
         prompt: "Smoke orphan recovery",
         async: true,
@@ -509,7 +607,7 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile) {
     params: {
       name: "run_coding_agent",
       arguments: {
-        agent: "claude",
+        agent: "cursor-agent",
         worktree,
         prompt: "Smoke restart recovery followup",
         async: false,
@@ -540,6 +638,9 @@ async function runMcpSmoke(home, worktree, binDirs, pidFile) {
     stderr: `${first.stderr}${second.stderr}`.trim(),
     serverVersion: init?.result?.serverInfo?.version,
     discoveryCount: parsedToolResults[3]?.agents?.length ?? 0,
+    registryStatus: parsedToolResults[3]?.registry?.status,
+    codexRegistryId: parsedToolResults[3]?.agents?.find((agent) => agent.id === "codex")?.registry?.id,
+    claudeRegistryId: parsedToolResults[3]?.agents?.find((agent) => agent.id === "claude")?.registry?.id,
     defaultLaunchExternalAgents: parsedToolResults[20]?.config?.safety?.launchExternalAgents,
     configuredLaunchExternalAgents: parsedToolResults[2]?.config?.safety?.launchExternalAgents,
     claudeDiscoveredVersion: parsedToolResults[3]?.agents?.find((agent) => agent.id === "claude")?.version,

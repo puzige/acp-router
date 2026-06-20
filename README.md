@@ -9,13 +9,15 @@ The plugin display name remains `Agent Router`; its bundled Codex skill is title
 This repository is an alpha implementation. It can:
 
 - expose Agent Router MCP tools to Codex;
-- discover local `opencode`, Cursor Agent `agent`, `claude`, and `codex` commands on `PATH`;
+- discover local `opencode`, Cursor Agent `agent`, `claude`, `codex`, and installed ACP adapter commands on `PATH`;
+- read ACP Registry metadata with a local cache and attach registry ids, icons, versions, and install hints to discovered agents;
 - probe installed agent versions when available;
 - persist Agent Router config, sessions, and jobs under `~/.codex/agent-router`;
 - write per-job JSONL logs;
 - capture current git worktree state for recorded jobs.
 - run OpenCode through ACP stdio by default for runnable jobs, with per-call and config overrides to disable external launch.
-- run Claude Code, Cursor Agent, and Codex CLI through CLI fallback adapters.
+- prefer installed ACP adapters for Claude Code and Codex CLI, and fall back to CLI adapters when ACP adapters are not installed.
+- run Cursor Agent through the official `agent` CLI fallback adapter.
 - launch supported adapters synchronously or as background jobs with persisted child process metadata and cancellable in-memory process tracking.
 - tail job event logs through `tail_coding_agent_job_events` so Codex can poll near-real-time progress without reading files directly.
 - recover jobs orphaned by an MCP server restart, best-effort terminate the recorded child PID, and release stale worktree locks.
@@ -54,7 +56,7 @@ codex plugin add agent-router@codex-agent-router
 For a pinned install of the current release:
 
 ```bash
-codex plugin marketplace add peanut996/codex-agent-router@v0.6.6
+codex plugin marketplace add peanut996/codex-agent-router@v0.6.7
 codex plugin add agent-router@codex-agent-router
 ```
 
@@ -70,7 +72,7 @@ npm run smoke:opencode:sessions
 npm run e2e:restart-recovery
 ```
 
-`npm run smoke` uses fake local `opencode`, `claude`, Cursor Agent `agent`, and `codex` commands so it can validate the ACP and CLI fallback adapters without model calls.
+`npm run smoke` uses fake local `opencode`, `claude-agent-acp`, `claude`, Cursor Agent `agent`, `codex-acp`, and `codex` commands plus a fake ACP Registry payload so it can validate ACP-first routing and CLI fallback adapters without model calls.
 
 `npm run smoke:sessions` uses fake OpenCode ACP to validate session list, continue, provider session resume, and archive behavior without model calls.
 
@@ -108,9 +110,9 @@ Last manual acceptance sweep: 2026-06-20.
 | --- | --- | --- | --- | --- |
 | OpenCode | Native ACP stdio | `npm run e2e:opencode -- --opencode-model opencode-go/glm-5.2 --keep` | Passed | `status=completed`, provider session created, `note.txt` changed |
 | OpenCode session lifecycle | Native ACP stdio | `npm run e2e:sessions:opencode -- --keep` | Passed | initial + continued jobs reused the same provider session and archive worked |
-| Claude Code | CLI fallback | `npm run e2e:claude -- --timeout-sec 600 --keep` | Passed | `status=completed`, `adapterStatus=claude_cli`, `note.txt` changed |
+| Claude Code | ACP preferred, CLI fallback retained | `npm run e2e:claude -- --timeout-sec 600 --keep` | CLI fallback passed | `status=completed`, `adapterStatus=claude_cli`, `note.txt` changed; ACP adapter path covered by smoke |
 | Cursor Agent | CLI fallback | `npm run e2e:cursor -- --timeout-sec 600 --keep` | Passed | `status=completed`, `adapterStatus=cursor_agent_cli`, provider session `e496274e-a32d-416e-9fc1-fc4e6d9319a5`, `note.txt` changed |
-| Codex CLI | CLI fallback | `npm run e2e:codex -- --timeout-sec 600 --keep` | Passed | `status=completed`, `adapterStatus=codex_cli`, `note.txt` changed |
+| Codex CLI | ACP preferred, CLI fallback retained | `npm run e2e:codex -- --timeout-sec 600 --keep` | CLI fallback passed | `status=completed`, `adapterStatus=codex_cli`, `note.txt` changed; ACP adapter path covered by smoke |
 
 For a passing real E2E, the JSON output should include `status: "completed"`, a non-empty `providerSessionId` when the provider exposes one, `changedFiles` containing `note.txt`, `failureReason: null`, `agentErrors: []`, and `gitStatus: "M note.txt"`.
 

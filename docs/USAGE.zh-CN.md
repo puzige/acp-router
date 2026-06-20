@@ -12,11 +12,13 @@ Agent Router 是一个本地 Codex 插件，用来让 Codex 通过统一的 rout
 | --- | --- | --- |
 | OpenCode | Native ACP stdio | 真实 E2E 已通过 |
 | OpenCode session lifecycle | Native ACP stdio | 真实 session list、continue、archive 已通过 |
-| Claude Code | CLI fallback | 真实 E2E 已通过 |
+| Claude Code | 优先 ACP adapter，保留 CLI fallback | CLI fallback 真实 E2E 已通过；ACP adapter 路径由 smoke 覆盖 |
 | Cursor Agent | 通过官方 `agent` 命令的 CLI fallback | 真实 E2E 已通过 |
-| Codex CLI | CLI fallback | 真实 E2E 已通过 |
+| Codex CLI | 优先 ACP adapter，保留 CLI fallback | CLI fallback 真实 E2E 已通过；ACP adapter 路径由 smoke 覆盖 |
 
 Codex 仍然是主控。外部 agent 在指定 worktree 中执行任务，Agent Router 会返回 job 状态、session id、修改文件、验证信息、失败原因、agent 错误和日志路径。
+
+Discovery 默认会读取 ACP Registry metadata。Registry 数据缓存到 `~/.codex/agent-router/acp-registry-cache.json`，只用于 id、icon、version 和安装提示；Agent Router 不会自动安装 adapter。
 
 ## 使用前要求
 
@@ -25,6 +27,8 @@ Codex 仍然是主控。外部 agent 在指定 worktree 中执行任务，Agent 
 - 写入型任务必须指定一个 git worktree。
 - 至少安装一个外部 agent：
   - `opencode`
+  - Claude ACP 使用 `claude-agent-acp`，或使用 `claude` 作为 CLI fallback
+  - Codex ACP 使用 `codex-acp`，或使用 `codex` 作为 CLI fallback
   - `claude`
   - Cursor Agent `agent`
   - `codex`
@@ -43,7 +47,7 @@ codex plugin add agent-router@codex-agent-router
 固定当前 release 安装：
 
 ```bash
-codex plugin marketplace add peanut996/codex-agent-router@v0.6.6
+codex plugin marketplace add peanut996/codex-agent-router@v0.6.7
 codex plugin add agent-router@codex-agent-router
 ```
 

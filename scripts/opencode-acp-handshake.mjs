@@ -45,11 +45,11 @@ async function handshake(cwd) {
       clientInfo: {
         name: "agent-router-smoke",
         title: "Agent Router Smoke",
-        version: "0.6.6"
+        version: "0.6.7"
       }
     }
   });
-  await sleep(700);
+  const initializeMessage = await waitForMessage(() => parseMessages(stdout).find((message) => message.id === 1), 5000);
   send(child, {
     jsonrpc: "2.0",
     id: 2,
@@ -57,9 +57,22 @@ async function handshake(cwd) {
     params: { cwd, mcpServers: [] }
   });
 
-  await sleep(1500);
+  const sessionMessage = await waitForMessage(() => parseMessages(stdout).find((message) => message.id === 2), 5000);
   child.kill("SIGTERM");
-  const messages = stdout
+  const initialize = initializeMessage?.result;
+  const session = sessionMessage?.result;
+  return {
+    initialized: initialize?.protocolVersion === 1,
+    agentInfo: initialize?.agentInfo ?? null,
+    sessionId: session?.sessionId ?? null,
+    sessionResult: session ?? null,
+    sessionError: sessionMessage?.error ?? null,
+    stderr: stderr.trim()
+  };
+}
+
+function parseMessages(stdout) {
+  return stdout
     .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => {
@@ -70,14 +83,16 @@ async function handshake(cwd) {
       }
     })
     .filter(Boolean);
-  const initialize = messages.find((message) => message.id === 1)?.result;
-  const session = messages.find((message) => message.id === 2)?.result;
-  return {
-    initialized: initialize?.protocolVersion === 1,
-    agentInfo: initialize?.agentInfo ?? null,
-    sessionId: session?.sessionId ?? null,
-    stderr: stderr.trim()
-  };
+}
+
+async function waitForMessage(findMessage, timeoutMs) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const message = findMessage();
+    if (message) return message;
+    await sleep(50);
+  }
+  return null;
 }
 
 function send(child, message) {

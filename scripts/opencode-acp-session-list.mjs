@@ -47,8 +47,9 @@ async function main() {
       launchExternalAgents: false
     });
 
+    const opencodeNative = listResult.nativeSessionList?.agents?.find((agent) => agent.agentId === "opencode");
     const passed = listResult.nativeSessionList?.attempted === true
-      && listResult.nativeSessionList.supported === true
+      && opencodeNative?.supported === true
       && Array.isArray(listResult.sessions);
     if (!passed) {
       keepArtifacts = true;

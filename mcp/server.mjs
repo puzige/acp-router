@@ -8,7 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const SERVER_NAME = "agent-router";
-const SERVER_VERSION = "0.6.6";
+const SERVER_VERSION = "0.6.7";
 const DATA_DIR = process.env.AGENT_ROUTER_DATA_DIR
   ? path.resolve(process.env.AGENT_ROUTER_DATA_DIR)
   : process.env.AGENT_DISPATCHER_DATA_DIR
@@ -16,7 +16,9 @@ const DATA_DIR = process.env.AGENT_ROUTER_DATA_DIR
     : path.join(os.homedir(), ".codex", "agent-router");
 const REGISTRY_PATH = path.join(DATA_DIR, "registry.json");
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
+const ACP_REGISTRY_CACHE_PATH = path.join(DATA_DIR, "acp-registry-cache.json");
 const LOG_DIR = path.join(DATA_DIR, "logs");
+const DEFAULT_ACP_REGISTRY_URL = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 const COMMAND_TIMEOUT_MS = 3000;
 const ACP_STARTUP_DELAY_MS = 300;
 const execFileAsync = promisify(execFile);
@@ -57,6 +59,9 @@ const TOOL_DEFINITIONS = [
         modeDefaults: { type: "object", additionalProperties: { type: "string" } },
         disabledAgents: { type: "array", items: { type: "string" } },
         allowCurrentDirectory: { type: "boolean" },
+        registryEnabled: { type: "boolean" },
+        registryUrl: { type: "string" },
+        registryCacheTtlSec: { type: "integer", minimum: 0 },
         launchExternalAgents: { type: "boolean" },
         allowBypassPermissions: { type: "boolean" },
         inheritEnvironment: { type: "boolean" }
@@ -201,6 +206,14 @@ const BUILT_IN_AGENTS = [
     versionArgs: ["--version"],
     transport: "acp_stdio",
     command: "opencode acp --cwd <worktree>",
+    acp: {
+      executable: "opencode",
+      versionArgs: ["--version"],
+      adapterStatus: "opencode_acp",
+      label: "OpenCode ACP",
+      buildArgsKey: "opencode",
+      buildArgs: ({ worktree }) => ["acp", "--cwd", worktree, "--print-logs", "--log-level", "ERROR"]
+    },
     capabilities: ["session_list", "session_continue", "file_edit", "shell", "diff_collection"],
     source: ["path", "registry"],
     notes: ["Native ACP adapter target for V1."]
@@ -223,9 +236,17 @@ const BUILT_IN_AGENTS = [
     versionArgs: ["--version"],
     transport: "cli",
     command: "claude -p --output-format stream-json",
+    acp: {
+      executable: "claude-agent-acp",
+      versionArgs: ["--version"],
+      adapterStatus: "claude_acp",
+      label: "Claude Agent ACP",
+      buildArgsKey: "claude-agent-acp",
+      buildArgs: () => []
+    },
     capabilities: ["file_edit", "shell", "permission_modes", "diff_collection"],
     source: ["path"],
-    notes: ["CLI fallback target."]
+    notes: ["ACP adapter preferred when claude-agent-acp is installed; otherwise CLI fallback target."]
   },
   {
     id: "codex",
@@ -234,9 +255,17 @@ const BUILT_IN_AGENTS = [
     versionArgs: ["--version"],
     transport: "cli",
     command: "codex exec",
+    acp: {
+      executable: "codex-acp",
+      versionArgs: ["--version"],
+      adapterStatus: "codex_acp",
+      label: "Codex ACP",
+      buildArgsKey: "codex-acp",
+      buildArgs: () => []
+    },
     capabilities: ["file_edit", "shell", "diff_collection"],
     source: ["path"],
-    notes: ["Use cautiously to avoid recursive control loops; require an isolated worktree."]
+    notes: ["ACP adapter preferred when codex-acp is installed. Use cautiously to avoid recursive control loops; require an isolated worktree."]
   }
 ];
 
@@ -358,7 +387,11 @@ async function callTool(name, args) {
 async function discoverAgents(args) {
   const config = await readConfig();
   const pathEntries = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
-  const agents = await Promise.all(BUILT_IN_AGENTS.map((agent) => probeAgent(agent, config, pathEntries)));
+  const acpRegistry = await readAcpRegistry(config, { refresh: args.refresh === true });
+  const agents = await Promise.all(BUILT_IN_AGENTS.map(async (agent) => enrichAgentWithRegistry(
+    await probeAgent(agent, config, pathEntries),
+    acpRegistry
+  )));
   const filteredAgents = args.includeNotInstalled === false
     ? agents.filter((agent) => agent.status !== "not_installed")
     : agents;
@@ -368,6 +401,7 @@ async function discoverAgents(args) {
     recommendedDefaultAgent: recommended.agentId
       ? { agentId: recommended.agentId, reason: recommended.reason }
       : null,
+    registry: acpRegistry.meta,
     refreshedAt: new Date().toISOString()
   };
 }
@@ -401,6 +435,15 @@ async function configureDispatcher(args) {
     allowCurrentDirectory: typeof args.allowCurrentDirectory === "boolean"
       ? args.allowCurrentDirectory
       : existing.allowCurrentDirectory,
+    registryEnabled: typeof args.registryEnabled === "boolean"
+      ? args.registryEnabled
+      : existing.registryEnabled,
+    registryUrl: typeof args.registryUrl === "string" && args.registryUrl.trim()
+      ? args.registryUrl.trim()
+      : existing.registryUrl,
+    registryCacheTtlSec: Number.isInteger(args.registryCacheTtlSec)
+      ? args.registryCacheTtlSec
+      : existing.registryCacheTtlSec,
     safety: nextSafety,
     updatedAt: new Date().toISOString()
   };
@@ -596,8 +639,8 @@ async function executeAndPersistJobRun({ args, job, session, selectedAgent, time
   const controller = createRunController(job.jobId);
   ACTIVE_RUNS.set(job.jobId, controller);
   try {
-    const runResult = launchKind === "opencode_acp"
-      ? await runOpenCodeAcpJob({
+    const runResult = launchKind === "acp_stdio"
+      ? await runAcpStdioJob({
         args,
         job,
         session,
@@ -914,9 +957,6 @@ function compactSessionForList(session) {
 }
 
 async function maybeListNativeSessions({ args, config, registry }) {
-  if (args.agent && args.agent !== "opencode") {
-    return { sessions: [], meta: { attempted: false, reason: "agent_filter_not_native_acp" } };
-  }
   if (config.safety.launchExternalAgents !== true) {
     return { sessions: [], meta: { attempted: false, reason: "launch_external_agents_disabled" } };
   }
@@ -925,51 +965,61 @@ async function maybeListNativeSessions({ args, config, registry }) {
   }
 
   const availableAgents = await discoverAgents({ includeNotInstalled: false }).then((value) => value.agents);
-  const opencode = availableAgents.find((agent) => agent.id === "opencode" && agent.status === "available");
-  if (!opencode) {
-    return { sessions: [], meta: { attempted: false, reason: "opencode_unavailable" } };
+  const acpAgents = availableAgents.filter((agent) => (
+    agent.status === "available"
+    && agent.acp?.available
+    && (!args.agent || agent.id === args.agent)
+  ));
+  if (acpAgents.length === 0) {
+    return { sessions: [], meta: { attempted: false, reason: "no_native_acp_agent_available" } };
   }
 
-  try {
-    const result = await listOpenCodeNativeSessions({
-      selectedAgent: opencode,
-      worktree: args.worktree ?? null,
-      env: safeEnv({ inheritEnvironment: config.safety.inheritEnvironment === true })
-    });
-    return {
-      sessions: mapNativeSessions({
+  const sessions = [];
+  const agents = [];
+  for (const agent of acpAgents) {
+    try {
+      const result = await listAcpNativeSessions({
+        selectedAgent: agent,
+        worktree: args.worktree ?? null,
+        env: safeEnv({ inheritEnvironment: config.safety.inheritEnvironment === true })
+      });
+      sessions.push(...mapNativeSessions({
         nativeSessions: result.sessions,
         registry,
         args,
-        agentId: opencode.id
-      }),
-      meta: {
+        agentId: agent.id
+      }));
+      agents.push({
         attempted: true,
-        agentId: opencode.id,
+        agentId: agent.id,
         supported: result.supported,
         sessionCount: result.sessions.length,
         pages: result.pages,
         nextCursor: result.nextCursor ?? null
-      }
-    };
-  } catch (error) {
-    return {
-      sessions: [],
-      meta: {
+      });
+    } catch (error) {
+      agents.push({
         attempted: true,
-        agentId: "opencode",
+        agentId: agent.id,
         supported: null,
         error: error.message
-      }
-    };
+      });
+    }
   }
+  return {
+    sessions,
+    meta: {
+      attempted: true,
+      agents
+    }
+  };
 }
 
-async function listOpenCodeNativeSessions({ selectedAgent, worktree, env }) {
+async function listAcpNativeSessions({ selectedAgent, worktree, env }) {
   const cwd = worktree ?? process.cwd();
   const client = new AcpStdioClient({
-    command: selectedAgent.installedPath ?? selectedAgent.executable ?? "opencode",
-    args: ["acp", "--cwd", cwd, "--print-logs", "--log-level", "ERROR"],
+    command: selectedAgent.acp.installedPath,
+    args: getAcpAdapterArgs(selectedAgent, cwd),
     cwd,
     timeoutMs: COMMAND_TIMEOUT_MS,
     env,
@@ -1162,6 +1212,9 @@ async function readConfig() {
     modeDefaults: {},
     disabledAgents: [],
     allowCurrentDirectory: false,
+    registryEnabled: true,
+    registryUrl: DEFAULT_ACP_REGISTRY_URL,
+    registryCacheTtlSec: 86400,
     safety: {
       requireAbsoluteWorktree: true,
       launchExternalAgents: true,
@@ -1177,6 +1230,9 @@ async function readConfig() {
     ...stored,
     modeDefaults: isPlainObject(stored.modeDefaults) ? stored.modeDefaults : defaults.modeDefaults,
     disabledAgents: Array.isArray(stored.disabledAgents) ? stored.disabledAgents : defaults.disabledAgents,
+    registryEnabled: typeof stored.registryEnabled === "boolean" ? stored.registryEnabled : defaults.registryEnabled,
+    registryUrl: typeof stored.registryUrl === "string" && stored.registryUrl.trim() ? stored.registryUrl : defaults.registryUrl,
+    registryCacheTtlSec: Number.isInteger(stored.registryCacheTtlSec) ? stored.registryCacheTtlSec : defaults.registryCacheTtlSec,
     safety: {
       ...defaults.safety,
       ...(isPlainObject(stored.safety) ? stored.safety : {})
@@ -1495,21 +1551,236 @@ async function selectExecutable(agent, pathEntries) {
   };
 }
 
+async function readAcpRegistry(config, { refresh = false } = {}) {
+  const disabledMeta = {
+    enabled: false,
+    sourceUrl: config.registryUrl,
+    status: "disabled",
+    agentCount: 0
+  };
+  if (config.registryEnabled !== true) {
+    return { agentsByRouterId: new Map(), meta: disabledMeta };
+  }
+
+  const now = Date.now();
+  const cache = await readAcpRegistryCache();
+  const ttlMs = Math.max(0, config.registryCacheTtlSec ?? 86400) * 1000;
+  const cacheFresh = cache
+    && cache.sourceUrl === config.registryUrl
+    && Array.isArray(cache.agents)
+    && !refresh
+    && ttlMs > 0
+    && now - Date.parse(cache.fetchedAt ?? 0) < ttlMs;
+  if (cacheFresh) {
+    return buildAcpRegistryResult(cache.agents, {
+      enabled: true,
+      status: "cached",
+      sourceUrl: cache.sourceUrl,
+      fetchedAt: cache.fetchedAt,
+      registryVersion: cache.registryVersion ?? null,
+      agentCount: cache.agents.length,
+      lastError: cache.lastError ?? null
+    });
+  }
+
+  try {
+    const registry = await fetchAcpRegistry(config.registryUrl);
+    const agents = normalizeRegistryAgents(registry);
+    const fetchedAt = new Date().toISOString();
+    const nextCache = {
+      schemaVersion: 1,
+      sourceUrl: config.registryUrl,
+      fetchedAt,
+      registryVersion: registry.version ?? null,
+      agentCount: agents.length,
+      agents,
+      lastError: null
+    };
+    await writeJson(ACP_REGISTRY_CACHE_PATH, nextCache);
+    return buildAcpRegistryResult(agents, {
+      enabled: true,
+      status: "fetched",
+      sourceUrl: config.registryUrl,
+      fetchedAt,
+      registryVersion: registry.version ?? null,
+      agentCount: agents.length,
+      lastError: null
+    });
+  } catch (error) {
+    if (cache?.agents?.length) {
+      return buildAcpRegistryResult(cache.agents, {
+        enabled: true,
+        status: "stale",
+        sourceUrl: cache.sourceUrl,
+        fetchedAt: cache.fetchedAt,
+        registryVersion: cache.registryVersion ?? null,
+        agentCount: cache.agents.length,
+        lastError: error.message
+      });
+    }
+    return {
+      agentsByRouterId: new Map(),
+      meta: {
+        enabled: true,
+        status: "unavailable",
+        sourceUrl: config.registryUrl,
+        agentCount: 0,
+        lastError: error.message
+      }
+    };
+  }
+}
+
+async function readAcpRegistryCache() {
+  try {
+    return await readJson(ACP_REGISTRY_CACHE_PATH, null);
+  } catch {
+    return null;
+  }
+}
+
+async function fetchAcpRegistry(registryUrl) {
+  if (registryUrl.startsWith("file://")) {
+    return JSON.parse(await fs.readFile(new URL(registryUrl), "utf8"));
+  }
+  if (path.isAbsolute(registryUrl)) {
+    return JSON.parse(await fs.readFile(registryUrl, "utf8"));
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), COMMAND_TIMEOUT_MS);
+  try {
+    const response = await fetch(registryUrl, { signal: controller.signal });
+    if (!response.ok) throw new Error(`Registry fetch failed with HTTP ${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function normalizeRegistryAgents(registry) {
+  if (!isPlainObject(registry) || !Array.isArray(registry.agents)) {
+    throw new Error("ACP registry payload must contain an agents array.");
+  }
+  return registry.agents.filter((agent) => (
+    isPlainObject(agent)
+    && typeof agent.id === "string"
+    && typeof agent.name === "string"
+    && isPlainObject(agent.distribution)
+  ));
+}
+
+function buildAcpRegistryResult(registryAgents, meta) {
+  const agentsByRouterId = new Map();
+  for (const registryAgent of registryAgents) {
+    const routerId = mapRegistryAgentToRouterId(registryAgent.id);
+    if (!routerId) continue;
+    agentsByRouterId.set(routerId, registryAgent);
+  }
+  return { agentsByRouterId, meta };
+}
+
+function mapRegistryAgentToRouterId(registryId) {
+  const mapping = {
+    "claude-acp": "claude",
+    "codex-acp": "codex",
+    opencode: "opencode"
+  };
+  return mapping[registryId] ?? null;
+}
+
+function enrichAgentWithRegistry(agent, acpRegistry) {
+  const registryAgent = acpRegistry.agentsByRouterId.get(agent.id);
+  if (!registryAgent) return agent;
+  const installHint = buildRegistryInstallHint(registryAgent);
+  return {
+    ...agent,
+    displayName: agent.displayName || registryAgent.name,
+    description: registryAgent.description ?? null,
+    icon: registryAgent.icon ? { kind: "registry_url", value: registryAgent.icon } : agent.icon,
+    registry: {
+      id: registryAgent.id,
+      name: registryAgent.name,
+      version: registryAgent.version ?? null,
+      repository: registryAgent.repository ?? null,
+      license: registryAgent.license ?? null,
+      distribution: registryAgent.distribution,
+      installHint
+    },
+    notes: [
+      ...agent.notes,
+      `Registry: ${registryAgent.name}${registryAgent.version ? ` ${registryAgent.version}` : ""}.`,
+      ...(installHint ? [`Install hint: ${installHint}`] : [])
+    ]
+  };
+}
+
+function buildRegistryInstallHint(registryAgent) {
+  const distribution = registryAgent.distribution;
+  const npxPackage = distribution?.npx?.package;
+  if (typeof npxPackage === "string" && npxPackage) {
+    return `npm install -g ${npxPackage}`;
+  }
+  const binary = distribution?.binary;
+  if (isPlainObject(binary)) {
+    const platformKey = getRegistryPlatformKey();
+    const target = binary[platformKey] ?? Object.values(binary).find(isPlainObject);
+    if (target?.archive) return `Install ${registryAgent.name} from ${target.archive}`;
+  }
+  return null;
+}
+
+function getRegistryPlatformKey() {
+  const osName = process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux";
+  const arch = process.arch === "arm64" ? "aarch64" : process.arch === "x64" ? "x86_64" : process.arch;
+  return `${osName}-${arch}`;
+}
+
 async function probeAgent(agent, config, pathEntries) {
   const selection = await selectExecutable(agent, pathEntries);
   const installedPath = selection.installedPath;
+  const acpSelection = agent.acp ? await selectExecutable({
+    executable: agent.acp.executable,
+    versionArgs: agent.acp.versionArgs ?? agent.versionArgs
+  }, pathEntries) : null;
+  const acpInstalledPath = acpSelection?.installedPath ?? null;
   const disabled = config.disabledAgents.includes(agent.id);
-  const notes = installedPath ? [`Found at ${installedPath}`] : agent.notes;
+  const notes = [];
+  if (acpInstalledPath) {
+    notes.push(`Found ACP adapter at ${acpInstalledPath}`);
+  }
+  if (installedPath) {
+    notes.push(`Found CLI at ${installedPath}`);
+  }
+  if (notes.length === 0) notes.push(...agent.notes);
   if (selection.selectionNote) notes.push(selection.selectionNote);
   if (selection.note) notes.push(selection.note);
+  if (acpSelection?.selectionNote) notes.push(acpSelection.selectionNote);
+  if (acpSelection?.note) notes.push(`ACP version probe failed: ${acpSelection.note.replace(/^Version probe failed: /, "")}`);
+  const status = disabled
+    ? "disabled"
+    : acpInstalledPath || installedPath
+      ? "available"
+      : "not_installed";
+  const transport = acpInstalledPath ? "acp_stdio" : agent.transport;
   return {
     id: agent.id,
     displayName: agent.displayName,
-    status: disabled ? "disabled" : installedPath ? "available" : "not_installed",
-    version: selection.version,
+    status,
+    version: acpSelection?.version ?? selection.version,
     installedPath,
-    transport: agent.transport,
-    command: agent.command,
+    transport,
+    command: acpInstalledPath ? `${agent.acp.executable} <acp stdio>` : agent.command,
+    acp: agent.acp ? {
+      executable: agent.acp.executable,
+      installedPath: acpInstalledPath,
+      version: acpSelection?.version ?? null,
+      adapterStatus: agent.acp.adapterStatus,
+      label: agent.acp.label,
+      buildArgsKey: agent.acp.buildArgsKey ?? agent.acp.executable,
+      available: Boolean(acpInstalledPath)
+    } : null,
+    fallbackTransport: acpInstalledPath && installedPath ? agent.transport : null,
+    fallbackCommand: acpInstalledPath && installedPath ? agent.command : null,
     source: agent.source,
     capabilities: agent.capabilities,
     icon: null,
@@ -1630,12 +1901,12 @@ function planLaunch({ launchingEnabled, selectedAgent }) {
       risks: ["No external agent process was launched in this alpha build."]
     };
   }
-  if (selectedAgent.id === "opencode") {
+  if (selectedAgent.acp?.available && selectedAgent.acp.installedPath) {
     return {
-      kind: "opencode_acp",
+      kind: "acp_stdio",
       runnable: true,
       adapterStatus: "starting",
-      summary: "Starting OpenCode ACP adapter.",
+      summary: `Starting ${selectedAgent.displayName} ACP adapter.`,
       risks: []
     };
   }
@@ -1659,15 +1930,19 @@ function planLaunch({ launchingEnabled, selectedAgent }) {
   };
 }
 
-async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec, agentEnv, controller }) {
+async function runAcpStdioJob({ args, job, session, selectedAgent, timeoutSec, agentEnv, controller }) {
+  const acpSpec = selectedAgent.acp;
+  if (!acpSpec?.installedPath) throw new Error(`No ACP adapter is available for ${selectedAgent.id}.`);
+  const adapterLabel = acpSpec.label ?? `${selectedAgent.displayName} ACP`;
+  const adapterStatus = acpSpec.adapterStatus ?? `${selectedAgent.id}_acp`;
   const events = [];
   const startedAt = Date.now();
   let providerSessionId = session.providerSessionId ?? null;
   let agentConfigOptions = [];
   let availableModels = [];
   const client = new AcpStdioClient({
-    command: selectedAgent.installedPath ?? selectedAgent.executable ?? "opencode",
-    args: ["acp", "--cwd", args.worktree, "--print-logs", "--log-level", "ERROR"],
+    command: acpSpec.installedPath,
+    args: getAcpAdapterArgs(selectedAgent, args.worktree),
     cwd: args.worktree,
     timeoutMs: timeoutSec * 1000,
     env: agentEnv,
@@ -1675,7 +1950,7 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
     onProcessStart: (child) => controller?.recordProcess({
       pid: child.pid,
       kind: "acp_stdio",
-      command: path.basename(selectedAgent.installedPath ?? selectedAgent.executable ?? "opencode"),
+      command: path.basename(acpSpec.installedPath),
       startedAt: new Date().toISOString()
     })
   });
@@ -1700,7 +1975,7 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
     events.push({
       type: "acp_initialize",
       timestamp: new Date().toISOString(),
-      message: "OpenCode ACP initialized.",
+      message: `${adapterLabel} initialized.`,
       result: summarizeInitializeResult(initialize)
     });
 
@@ -1720,14 +1995,14 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
     events.push({
       type: session.providerSessionId ? "acp_session_resumed" : "acp_session_created",
       timestamp: new Date().toISOString(),
-      message: `OpenCode ACP session ready: ${providerSessionId}`,
+      message: `${adapterLabel} session ready: ${providerSessionId}`,
       providerSessionId
     });
     if (agentConfigOptions.length > 0) {
       events.push({
         type: "acp_config_options",
         timestamp: new Date().toISOString(),
-        message: `OpenCode ACP exposed ${agentConfigOptions.length} config option(s), including ${availableModels.length} model option(s).`,
+        message: `${adapterLabel} exposed ${agentConfigOptions.length} config option(s), including ${availableModels.length} model option(s).`,
         configOptions: agentConfigOptions,
         availableModels
       });
@@ -1756,7 +2031,7 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
         {
           type: "acp_prompt_completed",
           timestamp: completedAt,
-          message: `OpenCode ACP prompt completed with stopReason=${stopReason ?? "unknown"}.`,
+          message: `${adapterLabel} prompt completed with stopReason=${stopReason ?? "unknown"}.`,
           stopReason
         },
         buildAcpProcessClosedEvent(startedAt)
@@ -1771,7 +2046,7 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
       jobPatch: {
         status: "completed",
         endedAt: completedAt,
-        adapterStatus: "opencode_acp",
+        adapterStatus,
         providerSessionId,
         stopReason,
         failureReason: null,
@@ -1783,7 +2058,7 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
           before: job.worktreeState,
           after: afterState
         },
-        resultSummary: agentText || `OpenCode ACP completed with stopReason=${stopReason ?? "unknown"}.`,
+        resultSummary: agentText || `${adapterLabel} completed with stopReason=${stopReason ?? "unknown"}.`,
         validation: [],
         risks: stopReason && stopReason !== "end_turn" ? [`OpenCode stopped with ${stopReason}.`] : []
       }
@@ -1797,8 +2072,8 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
     const agentErrors = extractAgentErrors(collectedEvents);
     const cancelled = controller?.cancelRequested === true;
     const failureReason = cancelled
-      ? (controller.cancelReason || "OpenCode ACP cancelled by Agent Router caller.")
-      : buildFailureReason("OpenCode ACP", error, agentErrors);
+      ? (controller.cancelReason || `${adapterLabel} cancelled by Agent Router caller.`)
+      : buildFailureReason(adapterLabel, error, agentErrors);
     return {
       events: [
         ...collectedEvents,
@@ -1821,7 +2096,7 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
       jobPatch: {
         status: cancelled ? "cancelled" : error.code === "timeout" ? "timed_out" : "failed",
         endedAt: failedAt,
-        adapterStatus: "opencode_acp",
+        adapterStatus,
         providerSessionId,
         failureReason,
         agentErrors,
@@ -1840,6 +2115,13 @@ async function runOpenCodeAcpJob({ args, job, session, selectedAgent, timeoutSec
   } finally {
     client.dispose();
   }
+}
+
+function getAcpAdapterArgs(selectedAgent, worktree) {
+  if (selectedAgent.id === "opencode") {
+    return ["acp", "--cwd", worktree, "--print-logs", "--log-level", "ERROR"];
+  }
+  return [];
 }
 
 async function runCliFallbackJob({ args, job, session, selectedAgent, timeoutSec, agentEnv, controller }) {
