@@ -68,6 +68,22 @@ Omit `--keep` to clean successful runs automatically. Failed runs are always kep
 
 `npm run e2e:sessions:opencode` runs two real OpenCode ACP jobs against the same dispatcher session, defaults the temporary project to `opencode-go/glm-5.2`, verifies provider session resume through the `acp_session_resumed` event, then archives the session.
 
+### Adapter Acceptance Matrix
+
+Last manual acceptance sweep: 2026-06-20.
+
+| Agent | Adapter | Real E2E command | Result | Evidence |
+| --- | --- | --- | --- | --- |
+| OpenCode | Native ACP stdio | `npm run e2e:opencode -- --opencode-model opencode-go/glm-5.2 --keep` | Passed | `status=completed`, provider session created, `note.txt` changed |
+| OpenCode session lifecycle | Native ACP stdio | `npm run e2e:sessions:opencode -- --keep` | Passed | initial + continued jobs reused the same provider session and archive worked |
+| Claude Code | CLI fallback | `npm run e2e:claude -- --timeout-sec 600 --keep` | Passed | `status=completed`, `adapterStatus=claude_cli`, `note.txt` changed |
+| Cursor Agent | CLI fallback | `npm run e2e:cursor -- --timeout-sec 600 --keep` | Passed | `status=completed`, `adapterStatus=cursor_agent_cli`, provider session `e496274e-a32d-416e-9fc1-fc4e6d9319a5`, `note.txt` changed |
+| Codex CLI | CLI fallback | `npm run e2e:codex -- --timeout-sec 600 --keep` | Passed | `status=completed`, `adapterStatus=codex_cli`, `note.txt` changed |
+
+For a passing real E2E, the JSON output should include `status: "completed"`, a non-empty `providerSessionId` when the provider exposes one, `changedFiles` containing `note.txt`, `failureReason: null`, `agentErrors: []`, and `gitStatus: "M note.txt"`.
+
+If an adapter fails, inspect `job.failureReason`, `job.agentErrors`, and `job.logPath` first. The dispatcher surfaces provider-side errors such as `rate_limit`, `authentication_failed`, insufficient balance, and local transport failures in those fields.
+
 The plugin manifest can be checked locally with:
 
 ```bash
