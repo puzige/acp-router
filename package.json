@@ -39,7 +39,8 @@
     "check": "node --check ./bin/acp-router.mjs && node --check ./bin/acp-router-cli.mjs && node --check ./mcp/constants.mjs && node --check ./mcp/utils.mjs && node --check ./mcp/storage.mjs && node --check ./mcp/agents.mjs && node --check ./mcp/acp-client.mjs && node --check ./mcp/jobs.mjs && node --check ./mcp/server.mjs && node -e \"import('./mcp/server.mjs')\""
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
   },
   "engines": {
     "node": ">=18"
