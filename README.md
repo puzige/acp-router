@@ -6,7 +6,7 @@ Generic MCP server for routing coding tasks to local ACP agents.
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node >=18](https://img.shields.io/badge/node-%3E%3D18-green.svg)](https://nodejs.org/)
 
-ACP Router discovers locally installed coding agents that speak the [Agent Client Protocol](https://agentclientprotocol.com/) (ACP), routes tasks to them inside isolated git worktrees, and tracks jobs, sessions, and event logs. It works with any MCP-compatible client -- Claude Desktop, Cursor, Windsurf, Codex, and others.
+ACP Router discovers coding agents from the [ACP Registry](https://agentclientprotocol.com/) (currently 37+ agents) and routes tasks to them inside isolated git worktrees, tracking jobs, sessions, and event logs. It works with any MCP-compatible client -- Claude Desktop, Cursor, Windsurf, Codex, and others.
 
 ## Quick Start
 
@@ -192,7 +192,7 @@ ACP Router exposes 9 MCP tools:
 
 | Tool | Description | Key Params |
 | --- | --- | --- |
-| `discover_agents` | Discover locally installed coding agents and their ACP adapter status. Returns transport, ACP availability, registry metadata, and install hints. | `refresh` (bool, optional), `includeNotInstalled` (bool, optional) |
+| `discover_agents` | Discover locally installed coding agents and their ACP adapter status. Returns transport, ACP availability, registry metadata, and install hints. Pass `excludeAgent` with your own agent id to avoid self-dispatch. | `refresh` (bool, optional), `includeNotInstalled` (bool, optional), `excludeAgent` (string, optional -- pass your own agent id to avoid self-dispatch) |
 | `get_agent_models` | Probe an ACP agent for its available model list. Starts a temporary ACP session, reads config options, and returns model choices. Use this before `run_agent` to discover valid model ids. | `agent` (string, required), `worktree` (string, optional) |
 | `manage_config` | Get or set ACP Router configuration including default agent, per-mode defaults, disabled agents, and safety policy. | `action` ("get" \| "set"), `defaultAgent`, `disabledAgents`, `launchExternalAgents`, `inheritEnvironment`, `allowBypassPermissions`, `defaultPermissionProfile`, `registryEnabled`, `registryUrl`, `registryCacheTtlSec`, `modeDefaults` |
 | `run_agent` | Run a coding agent in an isolated worktree. Requires an absolute worktree path. Supports sync and async execution. ACP-only -- CLI fallback is not supported. | `agent` (string, optional), `worktree` (string, required), `prompt` (string, required), `mode`, `async` (bool), `sessionId`, `timeoutSec`, `permissionProfile`, `model`, `collectDiff`, `launchExternalAgents`, `inheritEnvironment`, `metadata` |
@@ -200,7 +200,7 @@ ACP Router exposes 9 MCP tools:
 | `get_job` | Get an ACP Router job by id. | `jobId` (string, required) |
 | `tail_job_events` | Return newly recorded job events from the JSONL event log for polling-style progress updates. Events are streamed in real-time for long-running async jobs. | `jobId` (string, required), `afterEventIndex`, `limit`, `includeLogTail`, `logTailBytes` |
 | `cancel_job` | Cancel a job and terminate an active child process when the current MCP server owns it. | `jobId` (string, required), `reason` (string, optional) |
-| `manage_sessions` | List, continue, or archive ACP Router sessions. | `action` ("list" \| "continue" \| "archive"), `sessionId`, `prompt`, `agent`, `worktree`, `async`, `includeArchived`, `limit`, `launchExternalAgents`, `inheritEnvironment`, `timeoutSec` |
+| `manage_sessions` | List, read, continue, or archive ACP Router sessions. `read` loads a session's conversation history. | `action` ("list" \| "read" \| "continue" \| "archive"), `sessionId`, `prompt`, `agent`, `worktree`, `async`, `includeArchived`, `limit`, `launchExternalAgents`, `inheritEnvironment`, `timeoutSec` |
 
 ### Permission Profiles
 
@@ -243,17 +243,69 @@ ACP Router runs agents exclusively through the Agent Client Protocol (ACP). The 
 | ACP executable on `PATH` | Launches directly |
 | ACP executable not on `PATH`, registry has npx distribution | Auto-launches via `npx --yes <package>` |
 | ACP executable not on `PATH`, no npx distribution | Job fails with `acp_required` error and install hint |
-| Agent has no ACP adapter at all (e.g. Cursor Agent) | Job fails with `acp_required` error |
 
 ## Supported Agents
 
-| Agent | ACP Support | Launch Method | Notes |
+### How Agent Discovery Works
+
+ACP Router reads the [ACP Registry](https://agentclientprotocol.com/) to discover all compatible agents (currently 37+). For each agent:
+
+1. **Binary distributions** (e.g. OpenCode, Kimi, Goose, Devin): ACP Router probes your `PATH` for the executable. If found, it launches directly. If not found, the agent is marked `not_installed` and won't appear in `discover_agents` results by default.
+2. **npx distributions** (e.g. Gemini CLI, GitHub Copilot, Cline, Auggie, Qwen Code, GLM Agent): ACP Router auto-launches via `npx --yes <package>`. No pre-installation needed -- npx downloads the adapter on first run.
+3. **Hybrid distributions** (e.g. Codex CLI, Kilo, siGit): Uses PATH if available, falls back to npx.
+
+Use `discover_agents` to see which agents are available on your machine:
+
+```text
+discover_agents
+discover_agents with includeNotInstalled true, to see all registry agents including ones not yet installed
+```
+
+### Verified Agents
+
+These agents have been tested with ACP Router:
+
+| Agent | Type | Launch Method | Notes |
 | --- | --- | --- | --- |
-| OpenCode | Native ACP stdio | `opencode acp --cwd <worktree>` | Built-in ACP, no extra install needed |
-| Claude Code | ACP via `claude-agent-acp` | `claude-agent-acp` or `npx --yes @agentclientprotocol/claude-agent-acp` | ACP adapter preferred; npx fallback when not installed |
-| Codex CLI | ACP via `codex-acp` | `codex-acp` or `npx --yes @zed-industries/codex-acp` | ACP adapter preferred; npx fallback when not installed |
-| Cursor Agent | Native ACP via `acp` subcommand | `agent acp` | Cursor CLI with native ACP; pre-authenticate with `agent login` |
-| Devin | Native ACP via `acp` subcommand | `devin acp` | Cognition's Devin CLI; binary distribution from registry |
+| OpenCode | Binary | `opencode acp --cwd <worktree>` | Native ACP; adds `--cwd` and log flags |
+| Cursor Agent | Binary | `agent acp` | Cursor CLI with native ACP; pre-authenticate with `agent login` |
+| Claude Code | npx | `claude-agent-acp` or `npx --yes @agentclientprotocol/claude-agent-acp` | Uses Claude Agent SDK; needs ANTHROPIC_API_KEY |
+| Codex CLI | Hybrid | `codex-acp` or `npx --yes @zed-industries/codex-acp` | Wraps local Codex CLI; needs codex on PATH |
+| Devin | Binary | `devin acp` | Cognition's Devin CLI |
+
+### Other Registry Agents
+
+All 37+ agents in the ACP Registry are supported out of the box. Notable ones include:
+
+| Agent | Type | Notes |
+| --- | --- | --- |
+| Gemini CLI | npx | Google's CLI; `npx --yes @google/gemini-cli --acp` |
+| GitHub Copilot | npx | `npx --yes @github/copilot --acp` |
+| Kimi CLI | Binary | Moonshot AI; install from GitHub releases |
+| Qwen Code | npx | Alibaba's Qwen coding agent |
+| GLM Agent | npx | Zhipu's GLM coding agent |
+| Auggie CLI | npx | Augment Code's agent |
+| Cline | npx | Popular VS Code agent |
+| Factory Droid | npx | Factory's dev agent |
+| Goose | Binary | Block's open-source agent |
+| Grok Build | npx | xAI's coding agent |
+| Junie | Binary | JetBrains' agent |
+
+Run `discover_agents` to see the full list available on your machine.
+
+### Agent Selection
+
+When `run_agent` is called without an explicit `agent` parameter, ACP Router selects one automatically:
+
+1. If `defaultAgent` is configured and available, use it.
+2. If `modeDefaults` has an entry for the requested mode, use it.
+3. Otherwise, pick the first available agent with `acp_stdio` transport.
+
+Set a default via `manage_config`:
+
+```text
+manage_config with action "set", defaultAgent "opencode"
+```
 
 ## Configuration
 
@@ -331,19 +383,20 @@ If files were modified despite the `plan` profile, the job result includes a `pl
 ```bash
 git clone https://github.com/peanut996/acp-router.git
 cd acp-router
-npm install
+pnpm install
 ```
 
 ### Validation
 
 ```bash
-npm run check
+pnpm run check    # TypeScript typecheck (tsgo --noEmit)
+pnpm run build    # Build to dist/
 ```
 
 ### Start the server locally
 
 ```bash
-npm start
+pnpm start
 ```
 
 ## License
