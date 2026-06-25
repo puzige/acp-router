@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.10.2",
+  "version": "0.10.3",
   "description": "Generic MCP server for routing coding tasks to local ACP agents. Works with any MCP client (Claude Desktop, Cursor, Windsurf, Codex, etc.).",
   "license": "MIT",
   "author": {
