@@ -594,12 +594,13 @@ async function runGit(cwd: string, args: string[]): Promise<GitResult> {
 }
 
 function parseGitStatusFiles(stdout: string): string[] {
-  return stdout
+  const files = stdout
     .split(/\r?\n/)
     .map((line) => line.trimEnd())
     .filter(Boolean)
     .map((line) => line.slice(3).replace(/^.* -> /, ""))
     .filter(Boolean);
+  return files.length > 500 ? [...files.slice(0, 500), `... and ${files.length - 500} more`] : files;
 }
 
 function resolveExtraArgs(extraArgs: string[], worktree: string): string[] {

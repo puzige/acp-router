@@ -13,7 +13,7 @@ export interface AgentOverride {
 export type AcpModeMap = Record<string, Record<PermissionProfile, string>>;
 
 const SERVER_NAME = "acp-router";
-const SERVER_VERSION = "0.10.0";
+const SERVER_VERSION = "0.10.1";
 const DATA_DIR = process.env.ACP_ROUTER_DATA_DIR
   ? path.resolve(process.env.ACP_ROUTER_DATA_DIR)
   : path.join(os.homedir(), ".acp-router");

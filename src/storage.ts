@@ -203,7 +203,8 @@ async function readConfig(): Promise<Config> {
     safety: {
       ...defaults.safety,
       ...(isPlainObject(stored.safety) ? stored.safety : {}),
-      ...(migratedProfile && migratedProfile !== rawProfile ? { defaultPermissionProfile: migratedProfile } : {})
+      ...(migratedProfile && migratedProfile !== rawProfile ? { defaultPermissionProfile: migratedProfile } : {}),
+      launchExternalAgents: true
     }
   };
 }
@@ -382,7 +383,7 @@ async function recoverOrphanedJobs(): Promise<{ recoveredCount: number }> {
         ? "Agent Router sent SIGTERM to the recorded child PID during restart recovery; inspect the worktree if results look unexpected."
         : "The original agent process may have continued after the MCP server exited; inspect the worktree if results look unexpected."
     ];
-    job.recentEvents = [...(Array.isArray(job.recentEvents) ? job.recentEvents : []), event];
+    job.recentEvents = [...(Array.isArray(job.recentEvents) ? job.recentEvents : []), event].slice(-5);
     updateSessionAfterOrphanedJob(registry, job, recoveredAt);
     if (typeof job.logPath === "string" && job.logPath) {
       logEntries.push({
@@ -469,7 +470,7 @@ async function recordJobProcess(jobId: string, processInfo: NormalizedProcessInf
     ...(isPlainObject(job.process) ? job.process : {}),
     ...processInfo
   };
-  job.recentEvents = [...(Array.isArray(job.recentEvents) ? job.recentEvents : []), event];
+  job.recentEvents = [...(Array.isArray(job.recentEvents) ? job.recentEvents : []), event].slice(-5);
   registry.jobs[job.jobId] = job;
   await writeRegistry(registry);
   await appendJsonl(job.logPath ?? "", [{

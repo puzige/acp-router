@@ -405,7 +405,7 @@ async function persistJobRunResult({ job, session, selectedAgent, runResult }: {
     };
   }
   Object.assign(currentSession, runResult.sessionPatch);
-  currentJob.recentEvents = [...(currentJob.recentEvents ?? []), ...runResult.events];
+  currentJob.recentEvents = [...(currentJob.recentEvents ?? []), ...runResult.events].slice(-5);
   (currentSession as any).updatedAt = currentJob.endedAt;
   (currentSession as any).lastJobId = currentJob.jobId;
   registry.jobs[currentJob.jobId] = currentJob;
@@ -454,7 +454,11 @@ async function listJobs(args: ListJobsArgs): Promise<{ jobs: any[] }> {
     .filter((job) => !args.agent || job.agentId === args.agent)
     .filter((job) => !args.worktree || job.worktree === args.worktree)
     .sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)))
-    .slice(0, limit);
+    .slice(0, limit)
+    .map((job) => {
+      const { recentEvents, availableModels, agentConfigOptions, process, validation, ...lightweight } = job;
+      return lightweight;
+    });
   return { jobs };
 }
 
@@ -462,7 +466,8 @@ async function getJob(args: GetJobArgs): Promise<any> {
   const registry = await readRegistry();
   const job = registry.jobs[args.jobId];
   if (!job) return { jobId: args.jobId, status: "not_found" };
-  return { job };
+  const { recentEvents, availableModels, agentConfigOptions, process, validation, ...lightweight } = job;
+  return { job: lightweight };
 }
 
 async function tailJobEvents(args: TailJobEventsArgs): Promise<any> {
@@ -479,12 +484,20 @@ async function tailJobEvents(args: TailJobEventsArgs): Promise<any> {
     };
   }
 
-  const limit = clampInteger(args.limit, 50, 1, 200);
+  const limit = clampInteger(args.limit, 5, 1, 200);
   const afterEventIndex = Number.isInteger(args.afterEventIndex) ? args.afterEventIndex : null;
-  const startIndex = afterEventIndex == null ? 0 : afterEventIndex + 1;
+  
   const eventLog = await readJobEventLog(job.logPath);
+  const filteredEvents = eventLog.events.filter((e) => !["acp_agent_message_chunk", "acp_tool_call_chunk", "acp_llm_token", "model_completion_chunk"].includes(String(e.type)));
+  
+  const actualStartIndex = afterEventIndex == null 
+    ? 0 
+    : filteredEvents.findIndex(e => (e.eventIndex ?? 0) > afterEventIndex);
+  
+  const startIndex = actualStartIndex === -1 && afterEventIndex != null ? filteredEvents.length : actualStartIndex;
+
   const totalEvents = eventLog.events.length;
-  const events = eventLog.events.slice(startIndex, startIndex + limit);
+  const events = filteredEvents.slice(startIndex, startIndex + limit);
   const lastReturned = events.length > 0
     ? events[events.length - 1].eventIndex
     : afterEventIndex;
@@ -503,14 +516,12 @@ async function tailJobEvents(args: TailJobEventsArgs): Promise<any> {
     logPath: job.logPath ?? null,
     events,
     nextEventIndex: lastReturned,
-    hasMore: startIndex + events.length < totalEvents,
+    hasMore: startIndex + events.length < filteredEvents.length,
     totalEventCount: totalEvents
   };
   if (eventLog.note) result.note = eventLog.note;
   if (eventLog.parseErrors.length > 0) result.parseErrors = eventLog.parseErrors;
-  if (args.includeLogTail === true) {
-    result.logTail = await readLogTail(job.logPath, clampInteger(args.logTailBytes, 8192, 1, 65536));
-  }
+  // Log tail is forcefully disabled to avoid token bloat
   return result;
 }
 
@@ -546,7 +557,7 @@ async function cancelJob(args: CancelJobArgs): Promise<any> {
         timestamp: job.endedAt,
         message: args.reason || "Cancelled by Agent Router caller."
       }
-    ];
+    ].slice(-5);
     await writeRegistry(registry);
     await appendJsonl(job.logPath ?? "", job.recentEvents.slice(-1).map((event) => ({ ...event, jobId: job.jobId, sessionId: job.sessionId, agentId: job.agentId })));
   }

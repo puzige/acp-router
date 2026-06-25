@@ -491,7 +491,8 @@ function extractAgentText(events: AcpLogEvent[]): string {
     .filter((event) => event.type === "acp_agent_message_chunk")
     .map((event) => event.params?.update?.content?.text)
     .filter(Boolean);
-  return chunks.join("").trim();
+  const text = chunks.join("").trim();
+  return text.length > 10000 ? text.slice(0, 10000) + "\n...[truncated]" : text;
 }
 
 function extractAgentErrors(events: AcpLogEvent[]): string[] {
